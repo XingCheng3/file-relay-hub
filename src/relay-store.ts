@@ -69,6 +69,10 @@ export class RelayStore {
     return this.records.get(token);
   }
 
+  list(): RelayFileRecord[] {
+    return [...this.records.values()];
+  }
+
   async increaseDownloadCount(token: string): Promise<void> {
     const item = this.records.get(token);
     if (!item) return;
@@ -86,9 +90,9 @@ export class RelayStore {
     return record.downloadCount >= record.maxDownloads;
   }
 
-  async remove(token: string): Promise<void> {
+  async remove(token: string): Promise<boolean> {
     const record = this.records.get(token);
-    if (!record) return;
+    if (!record) return false;
 
     this.records.delete(token);
     await this.persist();
@@ -98,6 +102,8 @@ export class RelayStore {
     } catch {
       // ignore
     }
+
+    return true;
   }
 
   async cleanupExpired(): Promise<void> {
