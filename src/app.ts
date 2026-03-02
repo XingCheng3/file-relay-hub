@@ -127,6 +127,7 @@ function renderPreviewPage(record: RelayFileRecord, baseUrl: string): string {
   const token = escapeHtml(record.token);
   const originalName = escapeHtml(record.originalName);
   const downloadHref = `${baseUrl}/f/${record.token}`;
+  const escapedDownloadHref = escapeHtml(downloadHref);
 
   return renderPageShell(`
     <div class="card">
@@ -139,11 +140,42 @@ function renderPreviewPage(record: RelayFileRecord, baseUrl: string): string {
         <div class="label">过期时间</div><div class="value">${escapeHtml(formatDateTime(record.expiresAt))}</div>
         <div class="label">下载次数</div><div class="value">${record.downloadCount}${record.maxDownloads ? ` / ${record.maxDownloads}` : ''}</div>
       </div>
+
+      <div style="margin-top:14px">
+        <div class="label" style="margin-bottom:6px">下载链接（可复制分享）</div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <input id="download-link" value="${escapedDownloadHref}" readonly style="flex:1; min-width:260px; border-radius:8px; border:1px solid #3a4b7e; background:#0f1630; color:#e8ecf3; padding:10px" />
+          <button class="button" id="copy-btn" type="button" style="margin-top:0">复制链接</button>
+        </div>
+        <div id="copy-tip" class="muted" style="margin-top:6px"></div>
+      </div>
+
       <div class="button-row">
-        <a class="button" href="${escapeHtml(downloadHref)}">下载文件</a>
+        <a class="button" href="${escapedDownloadHref}">下载文件</a>
         <a class="button secondary" href="/">返回上传页</a>
       </div>
     </div>
+    <script>
+      (function () {
+        var btn = document.getElementById('copy-btn');
+        var input = document.getElementById('download-link');
+        var tip = document.getElementById('copy-tip');
+        if (!btn || !input) return;
+        btn.addEventListener('click', async function () {
+          try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              await navigator.clipboard.writeText(input.value);
+            } else {
+              input.select();
+              document.execCommand('copy');
+            }
+            if (tip) tip.textContent = '已复制到剪贴板';
+          } catch {
+            if (tip) tip.textContent = '复制失败，请手动复制';
+          }
+        });
+      })();
+    </script>
   `);
 }
 
