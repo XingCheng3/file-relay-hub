@@ -1,0 +1,13 @@
+services:
+  file-relay-hub:
+    build: .
+    container_name: file-relay-hub
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      CLEANUP_INTERVAL_MINUTES: 10
+    volumes:
+      - ./data:/app/data

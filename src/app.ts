@@ -10,6 +10,7 @@ import { RelayStore } from './relay-store';
 const RESERVED_FREE_SPACE_BYTES = 5 * 1024 * 1024 * 1024; // keep 5GB free
 const DEFAULT_EXPIRES_HOURS = 24;
 const MAX_EXPIRES_HOURS = 24 * 7;
+const DEFAULT_CLEANUP_INTERVAL_MINUTES = 10;
 
 async function getAvailableBytes(targetDir: string): Promise<number> {
   const stats = await fs.statfs(targetDir);
@@ -22,6 +23,19 @@ export async function buildApp(): Promise<FastifyInstance> {
   const dataDir = path.join(process.cwd(), 'data');
   const store = new RelayStore(dataDir);
   await store.init();
+
+  const cleanupIntervalMinutes = Number(process.env.CLEANUP_INTERVAL_MINUTES ?? DEFAULT_CLEANUP_INTERVAL_MINUTES);
+  const cleanupEveryMs = Number.isFinite(cleanupIntervalMinutes) && cleanupIntervalMinutes > 0
+    ? cleanupIntervalMinutes * 60 * 1000
+    : DEFAULT_CLEANUP_INTERVAL_MINUTES * 60 * 1000;
+
+  const cleanupTimer = setInterval(() => {
+    void store.cleanupExpired().catch((error) => app.log.error({ error }, 'cleanup job failed'));
+  }, cleanupEveryMs);
+
+  app.addHook('onClose', async () => {
+    clearInterval(cleanupTimer);
+  });
 
   await app.register(multipart, {
     limits: {

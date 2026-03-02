@@ -23,6 +23,12 @@ npm run dev
 
 浏览器访问 `http://<host>:3000/` 可使用 Web UI 上传文件并生成分享链接。
 
+### 环境变量
+
+- `HOST`（默认 `0.0.0.0`）
+- `PORT`（默认 `3000`）
+- `CLEANUP_INTERVAL_MINUTES`（默认 `10`，后台清理过期文件的间隔）
+
 ## API
 
 ### 健康检查
@@ -73,6 +79,14 @@ GET /f/:token/info
 npm run build
 npm start
 ```
+
+## Docker 部署
+
+```bash
+docker compose up -d --build
+```
+
+服务端口：`3000`，数据目录映射在宿主机 `./data`。
 
 ## 注意
 
