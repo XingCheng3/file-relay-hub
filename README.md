@@ -6,11 +6,16 @@
 
 - 上传文件（multipart）
 - 生成可分享下载链接
-- 新增分享预览页（`/s/:token`）
-- 链接过期时间（默认 24h，最大 7 天）
+- 分享预览页（`/s/:token`）
+- 可选过期时间：
+  - 支持按「小时 / 天」设置
+  - 留空表示永久链接（不过期）
 - 可选最大下载次数（到达后链接失效）
 - 本地磁盘存储（`data/uploads`）
-- 管理接口（基础版，无鉴权）：文件列表与删除
+- 管理接口（基础版，无鉴权）：
+  - 获取“未过期可用文件清单”
+  - 单文件删除
+  - 批量删除
 - 磁盘保护策略：上传后仍至少保留 5GB 可用空间（否则拒绝/回滚上传）
 - 不限制文件类型、不做网速限流（当前版本）
 
@@ -23,7 +28,7 @@ npm run dev
 
 默认监听：`http://0.0.0.0:3000`
 
-浏览器访问 `http://<host>:3000/` 可使用 Web UI 上传文件并生成分享链接。
+浏览器访问 `http://<host>:3000/` 可使用 Web UI 上传文件、查看共享文件清单并管理删除。
 
 ### 环境变量
 
@@ -49,7 +54,7 @@ Content-Type: multipart/form-data
 表单字段：
 
 - `file`：文件（必填）
-- `expiresInHours`：过期小时数（可选，默认 24，最大 168）
+- `expiresInHours`：过期小时数（可选，`1~168`；留空表示不过期）
 - `maxDownloads`：最大下载次数（可选）
 
 返回示例：
@@ -59,10 +64,12 @@ Content-Type: multipart/form-data
   "token": "...",
   "downloadUrl": "http://127.0.0.1:3000/f/...",
   "previewUrl": "http://127.0.0.1:3000/s/...",
-  "expiresAt": "2026-03-03T10:00:00.000Z",
+  "expiresAt": null,
   "maxDownloads": 3
 }
 ```
+
+> `expiresAt = null` 表示永久链接（不过期）。
 
 ### 下载预览页
 
@@ -70,7 +77,7 @@ Content-Type: multipart/form-data
 GET /s/:token
 ```
 
-返回 HTML 页面，显示文件名、文件大小、过期时间、下载次数，并提供下载按钮。
+返回 HTML 页面，显示文件名、文件大小、过期时间（或“永不过期”）、下载次数，并提供下载按钮。
 
 ### 下载文件
 
@@ -84,9 +91,9 @@ GET /f/:token
 GET /f/:token/info
 ```
 
-### 管理接口（基础版，无鉴权）
+## 管理接口（基础版，无鉴权）
 
-#### 获取当前可用文件列表
+### 获取当前可用文件列表（仅未过期）
 
 ```http
 GET /admin/files
@@ -101,14 +108,17 @@ GET /admin/files
       "token": "...",
       "fileName": "demo.zip",
       "size": 123456,
-      "expiresAt": "2026-03-03T10:00:00.000Z",
-      "downloadCount": 0
+      "expiresAt": null,
+      "downloadCount": 0,
+      "maxDownloads": null,
+      "downloadUrl": "http://127.0.0.1:3000/f/...",
+      "previewUrl": "http://127.0.0.1:3000/s/..."
     }
   ]
 }
 ```
 
-#### 删除指定文件
+### 删除指定文件
 
 ```http
 DELETE /admin/files/:token
@@ -116,6 +126,27 @@ DELETE /admin/files/:token
 
 - 成功：`204 No Content`
 - 文件不存在：`404`
+
+### 批量删除文件
+
+```http
+DELETE /admin/files
+Content-Type: application/json
+
+{
+  "tokens": ["tokenA", "tokenB"]
+}
+```
+
+返回示例：
+
+```json
+{
+  "removedCount": 2,
+  "removedTokens": ["tokenA", "tokenB"],
+  "notFoundTokens": []
+}
+```
 
 ## 构建运行
 

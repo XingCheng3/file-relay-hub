@@ -7,34 +7,58 @@
     <style>
       :root { color-scheme: light dark; }
       body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #0b1020; color: #e8ecf3; }
-      .wrap { max-width: 760px; margin: 36px auto; padding: 0 16px; }
+      .wrap { max-width: 980px; margin: 36px auto; padding: 0 16px; display: grid; gap: 16px; }
       .card { background: #141b31; border: 1px solid #2a365e; border-radius: 14px; padding: 18px; box-shadow: 0 8px 20px rgba(0,0,0,.2); }
-      h1 { margin-top: 0; font-size: 22px; }
+      h1, h2 { margin-top: 0; }
+      h1 { font-size: 22px; margin-bottom: 8px; }
+      h2 { font-size: 18px; margin-bottom: 8px; }
       p { color: #a9b6d3; }
       label { display: block; margin: 12px 0 6px; font-size: 14px; color: #c9d3ea; }
-      input { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 10px; border: 1px solid #3a4b7e; background: #0f1630; color: #e8ecf3; }
+      input, select { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 10px; border: 1px solid #3a4b7e; background: #0f1630; color: #e8ecf3; }
       input[type=file] { padding: 8px; }
-      button { margin-top: 14px; width: 100%; padding: 12px; border-radius: 10px; border: none; background: #4f7cff; color: #fff; font-weight: 600; cursor: pointer; }
+      button { margin-top: 14px; padding: 10px 14px; border-radius: 10px; border: none; background: #4f7cff; color: #fff; font-weight: 600; cursor: pointer; }
       button:disabled { opacity: .6; cursor: not-allowed; }
+      .button-danger { background: #b84545; }
+      .button-ghost { background: #2a365e; }
       .result { margin-top: 18px; padding: 12px; border-radius: 10px; background: #0f1630; border: 1px dashed #3a4b7e; }
       .link { word-break: break-all; display: block; margin-top: 8px; color: #8ab4ff; }
       .muted { font-size: 12px; color: #8ea0c8; }
       .error { color: #ff8d8d; margin-top: 10px; }
       .ok { color: #83f4aa; }
+      .expire-row { display: grid; grid-template-columns: 1fr 140px; gap: 10px; align-items: end; }
+      .table-wrap { overflow-x: auto; margin-top: 10px; }
+      table { width: 100%; border-collapse: collapse; min-width: 760px; }
+      th, td { text-align: left; border-bottom: 1px solid #2a365e; padding: 10px 8px; vertical-align: middle; }
+      th { color: #c9d3ea; font-size: 13px; }
+      td { color: #e8ecf3; font-size: 14px; }
+      .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .toolbar .muted { margin-left: auto; }
+      .empty { padding: 16px 6px; color: #8ea0c8; }
+      .ops { display: flex; gap: 8px; align-items: center; }
+      .ops a { color: #8ab4ff; text-decoration: none; }
+      .ops button { margin-top: 0; padding: 6px 10px; font-size: 12px; }
+      .loading { color: #8ea0c8; padding: 14px 0; }
     </style>
   </head>
   <body>
     <div class="wrap">
       <div class="card">
         <h1>📦 File Relay Hub</h1>
-        <p>上传文件后，生成可分享下载链接（支持过期时间和下载次数限制）。</p>
+        <p>上传文件后，生成可分享下载链接（支持可选过期时间和下载次数限制）。</p>
 
         <form id="upload-form">
           <label for="file">文件</label>
           <input id="file" name="file" type="file" required />
 
-          <label for="expiresInHours">过期小时数（1~168）</label>
-          <input id="expiresInHours" name="expiresInHours" type="number" min="1" max="168" value="24" />
+          <label for="expiresValue">过期时间（可留空=不过期）</label>
+          <div class="expire-row">
+            <input id="expiresValue" type="number" min="1" step="1" placeholder="留空表示不过期" />
+            <select id="expiresUnit">
+              <option value="hour" selected>小时</option>
+              <option value="day">天</option>
+            </select>
+          </div>
+          <div id="expiresHint" class="muted">留空=不过期；小时模式最大 168 小时，天模式最大 7 天</div>
 
           <label for="maxDownloads">最大下载次数（可选）</label>
           <input id="maxDownloads" name="maxDownloads" type="number" min="1" placeholder="留空表示不限" />
@@ -50,6 +74,31 @@
           <a id="download-link" class="link" target="_blank" rel="noopener noreferrer"></a>
         </div>
       </div>
+
+      <div class="card">
+        <h2>共享文件清单（未过期）</h2>
+        <div class="toolbar">
+          <button id="refresh-btn" class="button-ghost" type="button">刷新</button>
+          <button id="delete-selected-btn" class="button-danger" type="button" disabled>删除选中</button>
+          <span class="muted" id="selected-count">已选 0 项</span>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><input id="select-all" type="checkbox" /></th>
+                <th>文件名</th>
+                <th>大小</th>
+                <th>过期时间</th>
+                <th>下载次数</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="files-tbody"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <script>
@@ -60,6 +109,160 @@
       const tokenEl = document.getElementById('token');
       const expiresEl = document.getElementById('expires');
       const linkEl = document.getElementById('download-link');
+      const expiresValueEl = document.getElementById('expiresValue');
+      const expiresUnitEl = document.getElementById('expiresUnit');
+      const expiresHintEl = document.getElementById('expiresHint');
+
+      const filesTbodyEl = document.getElementById('files-tbody');
+      const refreshBtnEl = document.getElementById('refresh-btn');
+      const selectAllEl = document.getElementById('select-all');
+      const deleteSelectedBtnEl = document.getElementById('delete-selected-btn');
+      const selectedCountEl = document.getElementById('selected-count');
+
+      const selectedTokens = new Set();
+      let currentFiles = [];
+
+      function formatBytes(bytes) {
+        if (!Number.isFinite(bytes) || bytes < 0) return '-';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let value = bytes;
+        let unitIndex = 0;
+        while (value >= 1024 && unitIndex < units.length - 1) {
+          value /= 1024;
+          unitIndex += 1;
+        }
+        return `${value.toFixed(unitIndex === 0 ? 0 : 2)} ${units[unitIndex]}`;
+      }
+
+      function formatDateTime(iso) {
+        if (!iso) return '永不过期';
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return iso;
+        return d.toLocaleString('zh-CN', {
+          hour12: false,
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        });
+      }
+
+      function escapeHtml(input) {
+        return String(input)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/\"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function updateExpireInputLimit() {
+        if (expiresUnitEl.value === 'day') {
+          expiresValueEl.max = '7';
+          expiresHintEl.textContent = '留空=不过期；天模式最小 1 天，最大 7 天';
+        } else {
+          expiresValueEl.max = '168';
+          expiresHintEl.textContent = '留空=不过期；小时模式最小 1 小时，最大 168 小时';
+        }
+      }
+
+      function updateSelectionInfo() {
+        selectedCountEl.textContent = `已选 ${selectedTokens.size} 项`;
+        deleteSelectedBtnEl.disabled = selectedTokens.size === 0;
+
+        if (currentFiles.length === 0) {
+          selectAllEl.checked = false;
+          selectAllEl.indeterminate = false;
+          return;
+        }
+
+        const checkedCount = currentFiles.filter((item) => selectedTokens.has(item.token)).length;
+        selectAllEl.checked = checkedCount === currentFiles.length;
+        selectAllEl.indeterminate = checkedCount > 0 && checkedCount < currentFiles.length;
+      }
+
+      function renderFiles() {
+        if (currentFiles.length === 0) {
+          filesTbodyEl.innerHTML = '<tr><td class="empty" colspan="6">暂无可用文件</td></tr>';
+          updateSelectionInfo();
+          return;
+        }
+
+        filesTbodyEl.innerHTML = currentFiles.map((item) => {
+          const checked = selectedTokens.has(item.token) ? 'checked' : '';
+          const downloadInfo = item.maxDownloads ? `${item.downloadCount} / ${item.maxDownloads}` : `${item.downloadCount}`;
+          const token = escapeHtml(item.token);
+          const fileName = escapeHtml(item.fileName);
+          const previewUrl = escapeHtml(item.previewUrl);
+          const downloadUrl = escapeHtml(item.downloadUrl);
+          return `
+            <tr>
+              <td><input class="row-select" type="checkbox" data-token="${token}" ${checked} /></td>
+              <td>${fileName}</td>
+              <td>${formatBytes(item.size)}</td>
+              <td>${formatDateTime(item.expiresAt)}</td>
+              <td>${downloadInfo}</td>
+              <td>
+                <div class="ops">
+                  <a href="${previewUrl}" target="_blank" rel="noopener noreferrer">预览</a>
+                  <a href="${downloadUrl}" target="_blank" rel="noopener noreferrer">下载</a>
+                  <button class="row-delete button-danger" type="button" data-token="${token}">删除</button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+        updateSelectionInfo();
+      }
+
+      async function refreshFileList() {
+        filesTbodyEl.innerHTML = '<tr><td class="loading" colspan="6">加载中...</td></tr>';
+        try {
+          const res = await fetch('/admin/files');
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(data.error || '加载文件列表失败');
+          }
+
+          currentFiles = Array.isArray(data.files) ? data.files : [];
+          const tokenSet = new Set(currentFiles.map((item) => item.token));
+          for (const token of Array.from(selectedTokens)) {
+            if (!tokenSet.has(token)) selectedTokens.delete(token);
+          }
+
+          renderFiles();
+        } catch (err) {
+          filesTbodyEl.innerHTML = `<tr><td class="error" colspan="6">${err?.message || '加载文件列表失败'}</td></tr>`;
+          currentFiles = [];
+          selectedTokens.clear();
+          updateSelectionInfo();
+        }
+      }
+
+      async function deleteOne(token) {
+        const res = await fetch(`/admin/files/${encodeURIComponent(token)}`, { method: 'DELETE' });
+        if (!res.ok && res.status !== 404) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || '删除失败');
+        }
+      }
+
+      async function deleteMany(tokens) {
+        const res = await fetch('/admin/files', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tokens })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.error || '批量删除失败');
+        }
+      }
+
+      expiresUnitEl.addEventListener('change', updateExpireInputLimit);
 
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -75,9 +278,24 @@
         const fd = new FormData();
         fd.append('file', fileInput.files[0]);
 
-        const expires = document.getElementById('expiresInHours').value;
-        const maxDownloads = document.getElementById('maxDownloads').value;
-        if (expires) fd.append('expiresInHours', expires);
+        const expiresRaw = expiresValueEl.value.trim();
+        if (expiresRaw !== '') {
+          const parsed = Number(expiresRaw);
+          if (!Number.isFinite(parsed) || parsed <= 0) {
+            errorEl.textContent = '过期时间必须是大于 0 的数字';
+            return;
+          }
+
+          const normalized = Math.floor(parsed);
+          const unit = expiresUnitEl.value;
+          const expiresInHours = unit === 'day'
+            ? Math.min(normalized, 7) * 24
+            : Math.min(normalized, 168);
+
+          fd.append('expiresInHours', String(expiresInHours));
+        }
+
+        const maxDownloads = document.getElementById('maxDownloads').value.trim();
         if (maxDownloads) fd.append('maxDownloads', maxDownloads);
 
         submitBtn.disabled = true;
@@ -92,10 +310,12 @@
           }
 
           tokenEl.textContent = data.token;
-          expiresEl.textContent = data.expiresAt;
+          expiresEl.textContent = formatDateTime(data.expiresAt);
           linkEl.href = data.downloadUrl;
           linkEl.textContent = data.downloadUrl;
           resultEl.style.display = 'block';
+
+          await refreshFileList();
         } catch (err) {
           errorEl.textContent = err?.message || '上传失败';
         } finally {
@@ -103,6 +323,78 @@
           submitBtn.textContent = '上传并生成链接';
         }
       });
+
+      refreshBtnEl.addEventListener('click', () => {
+        void refreshFileList();
+      });
+
+      filesTbodyEl.addEventListener('change', (e) => {
+        const target = e.target;
+        if (!(target instanceof HTMLInputElement)) return;
+        if (!target.classList.contains('row-select')) return;
+
+        const token = target.dataset.token;
+        if (!token) return;
+
+        if (target.checked) {
+          selectedTokens.add(token);
+        } else {
+          selectedTokens.delete(token);
+        }
+
+        updateSelectionInfo();
+      });
+
+      selectAllEl.addEventListener('change', () => {
+        if (selectAllEl.checked) {
+          currentFiles.forEach((item) => selectedTokens.add(item.token));
+        } else {
+          currentFiles.forEach((item) => selectedTokens.delete(item.token));
+        }
+        renderFiles();
+      });
+
+      filesTbodyEl.addEventListener('click', async (e) => {
+        const target = e.target;
+        if (!(target instanceof HTMLElement)) return;
+
+        const button = target.closest('.row-delete');
+        if (!(button instanceof HTMLButtonElement)) return;
+
+        const token = button.dataset.token;
+        if (!token) return;
+
+        if (!confirm('确定删除该文件吗？删除后服务器本地文件也会同步删除。')) return;
+
+        button.disabled = true;
+        try {
+          await deleteOne(token);
+          selectedTokens.delete(token);
+          await refreshFileList();
+        } catch (err) {
+          alert(err?.message || '删除失败');
+          button.disabled = false;
+        }
+      });
+
+      deleteSelectedBtnEl.addEventListener('click', async () => {
+        const tokens = Array.from(selectedTokens);
+        if (tokens.length === 0) return;
+        if (!confirm(`确定删除选中的 ${tokens.length} 个文件吗？删除后服务器本地文件也会同步删除。`)) return;
+
+        deleteSelectedBtnEl.disabled = true;
+        try {
+          await deleteMany(tokens);
+          selectedTokens.clear();
+          await refreshFileList();
+        } catch (err) {
+          alert(err?.message || '批量删除失败');
+          updateSelectionInfo();
+        }
+      });
+
+      updateExpireInputLimit();
+      void refreshFileList();
     </script>
   </body>
 </html>

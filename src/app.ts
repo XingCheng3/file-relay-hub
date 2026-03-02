@@ -8,7 +8,6 @@ import { pipeline } from 'node:stream/promises';
 import { RelayStore, RelayFileRecord } from './relay-store';
 
 const RESERVED_FREE_SPACE_BYTES = 5 * 1024 * 1024 * 1024; // keep 5GB free
-const DEFAULT_EXPIRES_HOURS = 24;
 const MAX_EXPIRES_HOURS = 24 * 7;
 const DEFAULT_CLEANUP_INTERVAL_MINUTES = 10;
 
@@ -38,7 +37,8 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(unitIndex === 0 ? 0 : 2)} ${units[unitIndex]}`;
 }
 
-function formatDateTime(iso: string): string {
+function formatDateTime(iso: string | null): string {
+  if (!iso) return '永不过期';
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   return date.toLocaleString('zh-CN', {
@@ -206,16 +206,26 @@ export async function buildApp(): Promise<FastifyInstance> {
     }
 
     const fields = file.fields as Record<string, { value: string }>;
-    const expiresInput = Number(fields.expiresInHours?.value ?? DEFAULT_EXPIRES_HOURS);
-    const maxDownloadsInput = fields.maxDownloads?.value ? Number(fields.maxDownloads.value) : null;
 
-    const expiresInHours = Number.isFinite(expiresInput)
-      ? Math.min(Math.max(1, expiresInput), MAX_EXPIRES_HOURS)
-      : DEFAULT_EXPIRES_HOURS;
+    const expiresRaw = fields.expiresInHours?.value?.trim() ?? '';
+    let expiresInHours: number | null = null;
+    if (expiresRaw !== '') {
+      const parsedExpires = Number(expiresRaw);
+      if (!Number.isFinite(parsedExpires)) {
+        return reply.code(400).send({ error: 'invalid expiresInHours' });
+      }
+      expiresInHours = Math.min(Math.max(1, Math.floor(parsedExpires)), MAX_EXPIRES_HOURS);
+    }
 
-    const maxDownloads = maxDownloadsInput && Number.isFinite(maxDownloadsInput)
-      ? Math.max(1, Math.floor(maxDownloadsInput))
-      : null;
+    const maxDownloadsRaw = fields.maxDownloads?.value?.trim() ?? '';
+    let maxDownloads: number | null = null;
+    if (maxDownloadsRaw !== '') {
+      const parsedMaxDownloads = Number(maxDownloadsRaw);
+      if (!Number.isFinite(parsedMaxDownloads) || parsedMaxDownloads < 1) {
+        return reply.code(400).send({ error: 'invalid maxDownloads' });
+      }
+      maxDownloads = Math.max(1, Math.floor(parsedMaxDownloads));
+    }
 
     const token = store.makeToken();
     const storedName = store.makeStoredName(file.filename);
@@ -240,7 +250,9 @@ export async function buildApp(): Promise<FastifyInstance> {
     }
 
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + expiresInHours * 60 * 60 * 1000);
+    const expiresAt = expiresInHours === null
+      ? null
+      : new Date(now.getTime() + expiresInHours * 60 * 60 * 1000).toISOString();
 
     await store.create({
       token,
@@ -250,7 +262,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       size: stat.size,
       mimeType: file.mimetype || 'application/octet-stream',
       createdAt: now.toISOString(),
-      expiresAt: expiresAt.toISOString(),
+      expiresAt,
       downloadCount: 0,
       maxDownloads
     });
@@ -261,7 +273,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       token,
       downloadUrl: `${baseUrl}/f/${token}`,
       previewUrl: `${baseUrl}/s/${token}`,
-      expiresAt: expiresAt.toISOString(),
+      expiresAt,
       maxDownloads
     });
   });
@@ -362,14 +374,18 @@ export async function buildApp(): Promise<FastifyInstance> {
     return reply.send(createReadStream(record.filePath));
   });
 
-  app.get('/admin/files', async () => {
+  app.get('/admin/files', async (request) => {
     const records = store.list();
+    const baseUrl = getBaseUrl(request);
     const availableFiles: Array<{
       token: string;
       fileName: string;
       size: number;
-      expiresAt: string;
+      expiresAt: string | null;
       downloadCount: number;
+      maxDownloads: number | null;
+      downloadUrl: string;
+      previewUrl: string;
     }> = [];
 
     for (const record of records) {
@@ -390,7 +406,10 @@ export async function buildApp(): Promise<FastifyInstance> {
         fileName: record.originalName,
         size: record.size,
         expiresAt: record.expiresAt,
-        downloadCount: record.downloadCount
+        downloadCount: record.downloadCount,
+        maxDownloads: record.maxDownloads,
+        downloadUrl: `${baseUrl}/f/${record.token}`,
+        previewUrl: `${baseUrl}/s/${record.token}`
       });
     }
 
@@ -406,6 +425,36 @@ export async function buildApp(): Promise<FastifyInstance> {
     }
 
     return reply.code(204).send();
+  });
+
+  app.delete('/admin/files', async (request, reply) => {
+    const body = (request.body ?? {}) as { tokens?: unknown };
+    if (!Array.isArray(body.tokens)) {
+      return reply.code(400).send({ error: 'tokens must be an array' });
+    }
+
+    const tokens = [...new Set(body.tokens.filter((item): item is string => typeof item === 'string' && item.trim().length > 0))];
+    if (tokens.length === 0) {
+      return reply.code(400).send({ error: 'tokens array is empty' });
+    }
+
+    const removedTokens: string[] = [];
+    const notFoundTokens: string[] = [];
+
+    for (const token of tokens) {
+      const removed = await store.remove(token);
+      if (removed) {
+        removedTokens.push(token);
+      } else {
+        notFoundTokens.push(token);
+      }
+    }
+
+    return {
+      removedCount: removedTokens.length,
+      removedTokens,
+      notFoundTokens
+    };
   });
 
   app.setErrorHandler((error, _request, reply) => {

@@ -10,7 +10,7 @@ export interface RelayFileRecord {
   size: number;
   mimeType: string;
   createdAt: string;
-  expiresAt: string;
+  expiresAt: string | null;
   downloadCount: number;
   maxDownloads: number | null;
 }
@@ -38,7 +38,10 @@ export class RelayStore {
       const raw = await fs.readFile(this.dataFilePath, 'utf-8');
       const parsed = JSON.parse(raw) as RelayStoreData;
       for (const record of parsed.records ?? []) {
-        this.records.set(record.token, record);
+        this.records.set(record.token, {
+          ...record,
+          expiresAt: record.expiresAt ?? null
+        });
       }
     } catch {
       await this.persist();
@@ -82,6 +85,7 @@ export class RelayStore {
   }
 
   isExpired(record: RelayFileRecord): boolean {
+    if (!record.expiresAt) return false;
     return new Date(record.expiresAt).getTime() <= Date.now();
   }
 
