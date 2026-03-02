@@ -1,5 +1,6 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
+import fastifyStatic from '@fastify/static';
 import { createWriteStream, createReadStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -24,6 +25,11 @@ export async function buildApp(): Promise<FastifyInstance> {
     }
   });
 
+  await app.register(fastifyStatic, {
+    root: path.join(process.cwd(), 'public'),
+    prefix: '/'
+  });
+
   app.get('/health', async () => {
     return {
       status: 'ok',
@@ -31,16 +37,8 @@ export async function buildApp(): Promise<FastifyInstance> {
     };
   });
 
-  app.get('/', async () => {
-    return {
-      name: 'file-relay-hub',
-      version: '0.2.0',
-      endpoints: {
-        upload: 'POST /upload (multipart field: file)',
-        download: 'GET /f/:token',
-        fileInfo: 'GET /f/:token/info'
-      }
-    };
+  app.get('/', async (_request, reply) => {
+    return reply.sendFile('index.html');
   });
 
   app.post('/upload', async (request, reply) => {

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>File Relay Hub</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #0b1020; color: #e8ecf3; }
+      .wrap { max-width: 760px; margin: 36px auto; padding: 0 16px; }
+      .card { background: #141b31; border: 1px solid #2a365e; border-radius: 14px; padding: 18px; box-shadow: 0 8px 20px rgba(0,0,0,.2); }
+      h1 { margin-top: 0; font-size: 22px; }
+      p { color: #a9b6d3; }
+      label { display: block; margin: 12px 0 6px; font-size: 14px; color: #c9d3ea; }
+      input { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 10px; border: 1px solid #3a4b7e; background: #0f1630; color: #e8ecf3; }
+      input[type=file] { padding: 8px; }
+      button { margin-top: 14px; width: 100%; padding: 12px; border-radius: 10px; border: none; background: #4f7cff; color: #fff; font-weight: 600; cursor: pointer; }
+      button:disabled { opacity: .6; cursor: not-allowed; }
+      .result { margin-top: 18px; padding: 12px; border-radius: 10px; background: #0f1630; border: 1px dashed #3a4b7e; }
+      .link { word-break: break-all; display: block; margin-top: 8px; color: #8ab4ff; }
+      .muted { font-size: 12px; color: #8ea0c8; }
+      .error { color: #ff8d8d; margin-top: 10px; }
+      .ok { color: #83f4aa; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>📦 File Relay Hub</h1>
+        <p>上传文件后，生成可分享下载链接（支持过期时间和下载次数限制）。</p>
+
+        <form id="upload-form">
+          <label for="file">文件</label>
+          <input id="file" name="file" type="file" required />
+
+          <label for="expiresInHours">过期小时数（1~168）</label>
+          <input id="expiresInHours" name="expiresInHours" type="number" min="1" max="168" value="24" />
+
+          <label for="maxDownloads">最大下载次数（可选）</label>
+          <input id="maxDownloads" name="maxDownloads" type="number" min="1" placeholder="留空表示不限" />
+
+          <button id="submit-btn" type="submit">上传并生成链接</button>
+          <div id="error" class="error"></div>
+        </form>
+
+        <div id="result" class="result" style="display:none">
+          <div class="ok">✅ 上传成功</div>
+          <div class="muted">Token: <span id="token"></span></div>
+          <div class="muted">过期时间: <span id="expires"></span></div>
+          <a id="download-link" class="link" target="_blank" rel="noopener noreferrer"></a>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const form = document.getElementById('upload-form');
+      const submitBtn = document.getElementById('submit-btn');
+      const errorEl = document.getElementById('error');
+      const resultEl = document.getElementById('result');
+      const tokenEl = document.getElementById('token');
+      const expiresEl = document.getElementById('expires');
+      const linkEl = document.getElementById('download-link');
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        errorEl.textContent = '';
+        resultEl.style.display = 'none';
+
+        const fileInput = document.getElementById('file');
+        if (!fileInput.files || !fileInput.files[0]) {
+          errorEl.textContent = '请选择文件';
+          return;
+        }
+
+        const fd = new FormData();
+        fd.append('file', fileInput.files[0]);
+
+        const expires = document.getElementById('expiresInHours').value;
+        const maxDownloads = document.getElementById('maxDownloads').value;
+        if (expires) fd.append('expiresInHours', expires);
+        if (maxDownloads) fd.append('maxDownloads', maxDownloads);
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = '上传中...';
+
+        try {
+          const res = await fetch('/upload', { method: 'POST', body: fd });
+          const data = await res.json();
+
+          if (!res.ok) {
+            throw new Error(data.error || '上传失败');
+          }
+
+          tokenEl.textContent = data.token;
+          expiresEl.textContent = data.expiresAt;
+          linkEl.href = data.downloadUrl;
+          linkEl.textContent = data.downloadUrl;
+          resultEl.style.display = 'block';
+        } catch (err) {
+          errorEl.textContent = err?.message || '上传失败';
+        } finally {
+          submitBtn.disabled = false;
+          submitBtn.textContent = '上传并生成链接';
+        }
+      });
+    </script>
+  </body>
+</html>
