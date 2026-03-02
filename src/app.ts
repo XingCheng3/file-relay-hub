@@ -12,7 +12,8 @@ const RESERVED_FREE_SPACE_BYTES = 5 * 1024 * 1024 * 1024; // keep 5GB free
 const MAX_EXPIRES_HOURS = 24 * 7;
 const DEFAULT_CLEANUP_INTERVAL_MINUTES = 10;
 const APP_VERSION_FALLBACK = '0.0.0';
-const MULTIPART_MAX_FILE_SIZE_BYTES = Number.POSITIVE_INFINITY;
+const FASTIFY_BODY_LIMIT_BYTES = 20 * 1024 * 1024 * 1024; // 20 GB request body limit
+const MULTIPART_MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024 * 1024; // 20 GB per file
 
 function getRequiredAdminPassword(): string {
   const value = process.env.ADMIN_PASSWORD?.trim() ?? '';
@@ -471,7 +472,10 @@ function renderLoginPage(message = ''): string {
 }
 
 export async function buildApp(): Promise<FastifyInstance> {
-  const app = Fastify({ logger: true });
+  const app = Fastify({
+    logger: true,
+    bodyLimit: FASTIFY_BODY_LIMIT_BYTES
+  });
   const appVersion = await resolveAppVersion();
 
   const dataDir = path.join(process.cwd(), 'data');

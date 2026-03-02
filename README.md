@@ -25,7 +25,7 @@
   - 支持登录后 HttpOnly 会话 Cookie（Web UI 场景）
   - 分享下载链接（`/f/:token`、`/s/:token`）保持公开
 - 磁盘保护策略：上传后仍至少保留 5GB 可用空间（否则拒绝/回滚上传）
-- 上传链路不做应用层限速、不限制文件类型与文件大小（仅受“保留 5GB 可用空间”策略约束）
+- 上传链路不做应用层限速、不限制文件类型；应用层默认单文件上限 20GB（并保留 5GB 可用空间策略）
 
 ## 快速开始
 
@@ -100,8 +100,8 @@ Content-Type: multipart/form-data
 - 留空时 `expiresAt = null`，表示不过期
 
 上传限制说明：
-- 应用层不额外限制文件类型、上传速率与文件大小。
-- 仅保留“上传后仍至少保留 5GB 可用空间”策略。
+- 应用层不限制文件类型与上传速率；默认单文件上限 20GB（Fastify bodyLimit + multipart fileSize）。
+- 同时保留“上传后仍至少保留 5GB 可用空间”策略。
 - 若上游反向代理（如 Nginx）配置了 `client_max_body_size`，会由代理层先行拦截。
 - 服务端会检测 multipart 截断（`file.truncated` / `limit`），若发生则返回 `413` 并删除临时文件。
 
