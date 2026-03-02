@@ -28,7 +28,7 @@
       .ok { color: #83f4aa; }
       .expire-row { display: grid; grid-template-columns: 1fr 140px; gap: 10px; align-items: end; }
       .table-wrap { overflow-x: auto; margin-top: 10px; }
-      table { width: 100%; border-collapse: collapse; min-width: 880px; }
+      table { width: 100%; border-collapse: collapse; min-width: 940px; }
       th, td { text-align: left; border-bottom: 1px solid #2a365e; padding: 10px 8px; vertical-align: middle; }
       th { color: #c9d3ea; font-size: 13px; }
       td { color: #e8ecf3; font-size: 14px; }
@@ -62,7 +62,7 @@
       <div class="card">
         <div class="head-row">
           <h1>📦 File Relay Hub</h1>
-          <button id="relogin-btn" class="button-ghost" type="button" style="margin-top:0">切换密码</button>
+          <button id="logout-btn" class="button-ghost" type="button" style="margin-top:0">退出登录</button>
         </div>
         <p>上传文件后，生成可分享下载链接（支持可选过期时间和下载次数限制）。</p>
       </div>
@@ -137,7 +137,7 @@
                 <th>大小</th>
                 <th>创建时间</th>
                 <th>过期时间</th>
-                <th>下载次数</th>
+                <th>下载统计</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -148,8 +148,6 @@
     </div>
 
     <script>
-      const ADMIN_PASSWORD_STORAGE_KEY = 'fileRelayHubAdminPassword';
-
       const form = document.getElementById('upload-form');
       const submitBtn = document.getElementById('submit-btn');
       const errorEl = document.getElementById('error');
@@ -160,7 +158,7 @@
       const expiresValueEl = document.getElementById('expiresValue');
       const expiresUnitEl = document.getElementById('expiresUnit');
       const expiresHintEl = document.getElementById('expiresHint');
-      const reloginBtnEl = document.getElementById('relogin-btn');
+      const logoutBtnEl = document.getElementById('logout-btn');
 
       const storageStatusEl = document.getElementById('storage-status');
       const storageGridEl = document.getElementById('storage-grid');
@@ -180,27 +178,6 @@
       const selectedTokens = new Set();
       let currentFiles = [];
 
-      function getStoredPassword() {
-        return (sessionStorage.getItem(ADMIN_PASSWORD_STORAGE_KEY) || '').trim();
-      }
-
-      function promptPassword(message) {
-        const input = window.prompt(message || '请输入访问密码');
-        if (input === null) return null;
-        const password = input.trim();
-        if (!password) return null;
-        sessionStorage.setItem(ADMIN_PASSWORD_STORAGE_KEY, password);
-        return password;
-      }
-
-      function ensurePassword(forcePrompt) {
-        if (!forcePrompt) {
-          const cached = getStoredPassword();
-          if (cached) return cached;
-        }
-        return promptPassword('请输入页面访问密码');
-      }
-
       function bytesToGBString(bytes) {
         if (!Number.isFinite(bytes) || bytes < 0) return '-';
         return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
@@ -219,7 +196,6 @@
       }
 
       function formatDateTime(iso) {
-        if (!iso) return '永不过期';
         const d = new Date(iso);
         if (Number.isNaN(d.getTime())) return iso;
         return d.toLocaleString('zh-CN', {
@@ -233,6 +209,16 @@
         });
       }
 
+      function formatCreatedTime(iso) {
+        if (!iso) return '-';
+        return formatDateTime(iso);
+      }
+
+      function formatExpiresTime(iso) {
+        if (!iso) return '永不过期';
+        return formatDateTime(iso);
+      }
+
       function escapeHtml(input) {
         return String(input)
           .replace(/&/g, '&amp;')
@@ -242,34 +228,14 @@
           .replace(/'/g, '&#39;');
       }
 
-      function buildAdminHeaders(originHeaders, password) {
-        const headers = new Headers(originHeaders || {});
-        headers.set('x-admin-password', password);
-        return headers;
-      }
-
-      async function adminFetch(url, options = {}, retry = true) {
-        const password = ensurePassword(false);
-        if (!password) {
-          throw new Error('未输入访问密码');
-        }
-
+      async function adminFetch(url, options = {}) {
         const response = await fetch(url, {
-          ...options,
-          headers: buildAdminHeaders(options.headers, password)
+          credentials: 'same-origin',
+          ...options
         });
 
-        if (response.status === 401 && retry) {
-          sessionStorage.removeItem(ADMIN_PASSWORD_STORAGE_KEY);
-          const nextPassword = ensurePassword(true);
-          if (!nextPassword) {
-            return response;
-          }
-
-          return fetch(url, {
-            ...options,
-            headers: buildAdminHeaders(options.headers, nextPassword)
-          });
+        if (response.status === 401) {
+          window.location.href = '/';
         }
 
         return response;
@@ -309,7 +275,8 @@
 
         filesTbodyEl.innerHTML = currentFiles.map((item) => {
           const checked = selectedTokens.has(item.token) ? 'checked' : '';
-          const downloadInfo = item.maxDownloads ? `${item.downloadCount} / ${item.maxDownloads}` : `${item.downloadCount}`;
+          const maxDownloadsLabel = item.maxDownloads === null || item.maxDownloads === undefined ? '不限' : String(item.maxDownloads);
+          const downloadInfo = `当前 ${item.downloadCount} / 最大 ${maxDownloadsLabel}`;
           const token = escapeHtml(item.token);
           const fileName = escapeHtml(item.fileName);
           const previewUrl = escapeHtml(item.previewUrl);
@@ -319,8 +286,8 @@
               <td><input class="row-select" type="checkbox" data-token="${token}" ${checked} /></td>
               <td>${fileName}</td>
               <td>${formatBytes(item.size)}</td>
-              <td>${formatDateTime(item.createdAt)}</td>
-              <td>${formatDateTime(item.expiresAt)}</td>
+              <td>${formatCreatedTime(item.createdAt)}</td>
+              <td>${formatExpiresTime(item.expiresAt)}</td>
               <td>${downloadInfo}</td>
               <td>
                 <div class="ops">
@@ -346,9 +313,9 @@
             throw new Error(data.error || '加载磁盘空间失败');
           }
 
-          storageTotalEl.textContent = bytesToGBString(data.totalBytes);
-          storageUsedEl.textContent = bytesToGBString(data.usedBytes);
-          storageAvailableEl.textContent = bytesToGBString(data.availableBytes);
+          storageTotalEl.textContent = data.total || bytesToGBString(data.totalBytes);
+          storageUsedEl.textContent = data.used || bytesToGBString(data.usedBytes);
+          storageAvailableEl.textContent = data.available || bytesToGBString(data.availableBytes);
 
           storageTotalBytesEl.textContent = `${formatBytes(data.totalBytes)} (${data.totalBytes} bytes)`;
           storageUsedBytesEl.textContent = `${formatBytes(data.usedBytes)} (${data.usedBytes} bytes)`;
@@ -366,7 +333,7 @@
         filesTbodyEl.innerHTML = '<tr><td class="loading" colspan="7">加载中...</td></tr>';
         try {
           const res = await adminFetch('/admin/files');
-          const data = await res.json();
+          const data = await res.json().catch(() => ({}));
           if (!res.ok) {
             throw new Error(data.error || '加载文件列表失败');
           }
@@ -406,12 +373,9 @@
         }
       }
 
-      reloginBtnEl.addEventListener('click', () => {
-        sessionStorage.removeItem(ADMIN_PASSWORD_STORAGE_KEY);
-        const nextPassword = ensurePassword(true);
-        if (!nextPassword) return;
-        void refreshStorage();
-        void refreshFileList();
+      logoutBtnEl.addEventListener('click', async () => {
+        await fetch('/admin/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => undefined);
+        window.location.href = '/';
       });
 
       expiresUnitEl.addEventListener('change', updateExpireInputLimit);
@@ -451,7 +415,6 @@
         const maxDownloads = document.getElementById('maxDownloads').value.trim();
         if (maxDownloads) fd.append('maxDownloads', maxDownloads);
 
-        // multipart 字段建议在 file 前发送，避免后端读取 file 时拿不到后续字段
         fd.append('file', fileInput.files[0]);
 
         submitBtn.disabled = true;
@@ -466,7 +429,7 @@
           }
 
           tokenEl.textContent = data.token;
-          expiresEl.textContent = formatDateTime(data.expiresAt);
+          expiresEl.textContent = formatExpiresTime(data.expiresAt);
           linkEl.href = data.downloadUrl;
           linkEl.textContent = data.downloadUrl;
           resultEl.style.display = 'block';
@@ -550,7 +513,6 @@
       });
 
       updateExpireInputLimit();
-      ensurePassword(false);
       void Promise.all([refreshStorage(), refreshFileList()]);
     </script>
   </body>

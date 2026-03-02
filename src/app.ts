@@ -3,6 +3,7 @@ import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { createWriteStream, createReadStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { RelayStore, RelayFileRecord } from './relay-store';
@@ -12,6 +13,14 @@ const MAX_EXPIRES_HOURS = 24 * 7;
 const DEFAULT_CLEANUP_INTERVAL_MINUTES = 10;
 const DEFAULT_ADMIN_PASSWORD = '17734';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim() || DEFAULT_ADMIN_PASSWORD;
+const ADMIN_SESSION_COOKIE_NAME = 'fileRelayHubAdminSession';
+const ADMIN_SESSION_TTL_HOURS = Math.max(1, Number(process.env.ADMIN_SESSION_TTL_HOURS ?? 12));
+const ADMIN_SESSION_MAX_AGE_SECONDS = Math.floor(ADMIN_SESSION_TTL_HOURS * 60 * 60);
+const ADMIN_SESSION_SECRET =
+  process.env.ADMIN_SESSION_SECRET?.trim() || `file-relay-hub:${ADMIN_PASSWORD}:admin-session`;
+
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+const MAX_BATCH_DELETE_TOKENS = 200;
 
 async function getStorageStats(targetDir: string): Promise<{ total: number; used: number; available: number }> {
   const stats = await fs.statfs(targetDir);
@@ -32,8 +41,102 @@ function extractAdminPassword(headers: Record<string, unknown>): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function safeCompare(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) return false;
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function getCookieValue(headers: Record<string, unknown>, key: string): string {
+  const raw = headers.cookie;
+  const cookieString = Array.isArray(raw) ? raw.join(';') : typeof raw === 'string' ? raw : '';
+  if (!cookieString) return '';
+
+  const pairs = cookieString.split(';');
+  for (const pair of pairs) {
+    const [name, ...rest] = pair.trim().split('=');
+    if (name !== key) continue;
+    return decodeURIComponent(rest.join('=') || '');
+  }
+
+  return '';
+}
+
+function makeAdminSessionToken(expiresAtMs: number): string {
+  const payload = String(expiresAtMs);
+  const signature = crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(payload).digest('hex');
+  return `${payload}.${signature}`;
+}
+
+function verifyAdminSessionToken(token: string): boolean {
+  const [expiresRaw, signature] = token.split('.');
+  if (!expiresRaw || !signature) return false;
+  if (!/^\d+$/.test(expiresRaw)) return false;
+  if (!/^[a-f0-9]{64}$/.test(signature)) return false;
+
+  const expiresAtMs = Number(expiresRaw);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return false;
+
+  const expected = crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(expiresRaw).digest('hex');
+  return safeCompare(expected, signature);
+}
+
+function buildSetCookieValue(value: string, secure: boolean): string {
+  const parts = [
+    `${ADMIN_SESSION_COOKIE_NAME}=${encodeURIComponent(value)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${ADMIN_SESSION_MAX_AGE_SECONDS}`
+  ];
+
+  if (secure) {
+    parts.push('Secure');
+  }
+
+  return parts.join('; ');
+}
+
+function isHttpsRequest(request: FastifyRequest): boolean {
+  const forwardedProto = request.headers['x-forwarded-proto'];
+  const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  if (typeof proto === 'string') {
+    return proto.split(',')[0]?.trim().toLowerCase() === 'https';
+  }
+  return request.protocol === 'https';
+}
+
+function setAdminSessionCookie(reply: FastifyReply, request: FastifyRequest): void {
+  const expiresAt = Date.now() + ADMIN_SESSION_MAX_AGE_SECONDS * 1000;
+  const token = makeAdminSessionToken(expiresAt);
+  reply.header('Set-Cookie', buildSetCookieValue(token, isHttpsRequest(request)));
+}
+
+function clearAdminSessionCookie(reply: FastifyReply, request: FastifyRequest): void {
+  const parts = [
+    `${ADMIN_SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=0'
+  ];
+
+  if (isHttpsRequest(request)) {
+    parts.push('Secure');
+  }
+
+  reply.header('Set-Cookie', parts.join('; '));
+}
+
 function isAuthorizedAdminRequest(request: { headers: Record<string, unknown> }): boolean {
-  return extractAdminPassword(request.headers) === ADMIN_PASSWORD;
+  const headerPassword = extractAdminPassword(request.headers);
+  if (headerPassword && safeCompare(headerPassword, ADMIN_PASSWORD)) {
+    return true;
+  }
+
+  const sessionToken = getCookieValue(request.headers, ADMIN_SESSION_COOKIE_NAME);
+  return sessionToken ? verifyAdminSessionToken(sessionToken) : false;
 }
 
 function escapeHtml(input: string): string {
@@ -76,6 +179,28 @@ function getBaseUrl(request: { headers: Record<string, unknown> }): string {
   const host = (request.headers.host as string | undefined) ?? 'localhost:3000';
   const protocol = (request.headers['x-forwarded-proto'] as string | undefined) ?? 'http';
   return `${protocol}://${host}`;
+}
+
+function normalizeToken(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+function isValidToken(token: string): boolean {
+  return TOKEN_PATTERN.test(token);
+}
+
+function safeDownloadFilename(name: string): string {
+  const cleaned = name.replace(/[\r\n"\\]/g, '_').trim();
+  return cleaned || 'download.bin';
+}
+
+function toContentDisposition(filename: string): string {
+  const fallback = safeDownloadFilename(filename);
+  const encoded = encodeURIComponent(filename)
+    .replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/%(7C|60|5E)/g, (m) => m.toLowerCase());
+
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
 function renderPageShell(content: string): string {
@@ -149,6 +274,7 @@ function renderPreviewPage(record: RelayFileRecord, baseUrl: string): string {
   const originalName = escapeHtml(record.originalName);
   const downloadHref = `${baseUrl}/f/${record.token}`;
   const escapedDownloadHref = escapeHtml(downloadHref);
+  const maxDownloads = record.maxDownloads === null ? '不限' : String(record.maxDownloads);
 
   return renderPageShell(`
     <div class="card">
@@ -159,7 +285,7 @@ function renderPreviewPage(record: RelayFileRecord, baseUrl: string): string {
         <div class="label">Token</div><div class="value">${token}</div>
         <div class="label">文件大小</div><div class="value">${formatBytes(record.size)} (${record.size} bytes)</div>
         <div class="label">过期时间</div><div class="value">${escapeHtml(formatDateTime(record.expiresAt))}</div>
-        <div class="label">下载次数</div><div class="value">${record.downloadCount}${record.maxDownloads ? ` / ${record.maxDownloads}` : ''}</div>
+        <div class="label">下载计数</div><div class="value">当前 ${record.downloadCount} / 最大 ${maxDownloads}</div>
       </div>
 
       <div style="margin-top:14px">
@@ -173,7 +299,6 @@ function renderPreviewPage(record: RelayFileRecord, baseUrl: string): string {
 
       <div class="button-row">
         <a class="button" href="${escapedDownloadHref}">下载文件</a>
-        <a class="button secondary" href="/">返回上传页</a>
       </div>
     </div>
     <script>
@@ -205,7 +330,6 @@ function renderStatusPage(title: string, message: string): string {
     <div class="card">
       <h1 class="status-title">${escapeHtml(title)}</h1>
       <p class="muted">${escapeHtml(message)}</p>
-      <a class="button secondary" href="/">返回上传页</a>
     </div>
   `);
 }
@@ -277,36 +401,13 @@ function renderLoginPage(message = ''): string {
 
     <script>
       (function () {
-        var STORAGE_KEY = 'fileRelayHubAdminPassword';
         var form = document.getElementById('login-form');
         var input = document.getElementById('password');
         var errorEl = document.getElementById('error');
 
-        async function tryEnter(password) {
-          const res = await fetch('/', {
-            headers: { 'x-admin-password': password }
-          });
-
-          if (!res.ok) {
-            throw new Error('密码错误，请重试');
-          }
-
-          sessionStorage.setItem(STORAGE_KEY, password);
-          const html = await res.text();
-          document.open();
-          document.write(html);
-          document.close();
-        }
-
-        var cached = (sessionStorage.getItem(STORAGE_KEY) || '').trim();
-        if (cached) {
-          tryEnter(cached).catch(function () {
-            sessionStorage.removeItem(STORAGE_KEY);
-          });
-        }
-
         if (!form || !input) return;
-        form.addEventListener('submit', function (e) {
+
+        form.addEventListener('submit', async function (e) {
           e.preventDefault();
           var password = input.value.trim();
           if (!password) {
@@ -314,11 +415,24 @@ function renderLoginPage(message = ''): string {
             return;
           }
 
-          tryEnter(password).catch(function (err) {
+          try {
+            var res = await fetch('/admin/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: password })
+            });
+
+            var payload = await res.json().catch(function () { return {}; });
+            if (!res.ok) {
+              throw new Error(payload.error || '密码错误，请重试');
+            }
+
+            window.location.href = '/';
+          } catch (err) {
             if (errorEl) errorEl.textContent = (err && err.message) || '验证失败';
             input.focus();
             input.select();
-          });
+          }
         });
       })();
     </script>
@@ -346,6 +460,13 @@ export async function buildApp(): Promise<FastifyInstance> {
     clearInterval(cleanupTimer);
   });
 
+  app.addHook('onRequest', async (_request, reply) => {
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('Referrer-Policy', 'same-origin');
+    reply.header('Cross-Origin-Resource-Policy', 'same-origin');
+  });
+
   await app.register(multipart, {
     limits: {
       files: 1
@@ -357,9 +478,13 @@ export async function buildApp(): Promise<FastifyInstance> {
     prefix: '/'
   });
 
-  const requireAdminPassword = async (request: FastifyRequest, reply: FastifyReply) => {
+  const requireAdminAccess = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isAuthorizedAdminRequest(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
+    }
+
+    if (extractAdminPassword(request.headers)) {
+      setAdminSessionCookie(reply, request);
     }
   };
 
@@ -370,7 +495,25 @@ export async function buildApp(): Promise<FastifyInstance> {
     };
   });
 
-  app.get('/', async (request, reply) => {
+  app.post('/admin/login', async (request, reply) => {
+    const body = (request.body ?? {}) as { password?: unknown };
+    const inputPassword = typeof body.password === 'string' ? body.password.trim() : '';
+
+    if (!inputPassword || !safeCompare(inputPassword, ADMIN_PASSWORD)) {
+      clearAdminSessionCookie(reply, request);
+      return reply.code(401).send({ error: 'invalid password' });
+    }
+
+    setAdminSessionCookie(reply, request);
+    return { ok: true };
+  });
+
+  app.post('/admin/logout', async (request, reply) => {
+    clearAdminSessionCookie(reply, request);
+    return reply.code(204).send();
+  });
+
+  const serveAdminIndex = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isAuthorizedAdminRequest(request)) {
       return reply
         .code(401)
@@ -378,13 +521,25 @@ export async function buildApp(): Promise<FastifyInstance> {
         .send(renderLoginPage());
     }
 
+    setAdminSessionCookie(reply, request);
     return reply.sendFile('index.html');
-  });
+  };
 
-  app.post('/upload', { preHandler: requireAdminPassword }, async (request, reply) => {
+  app.get('/', serveAdminIndex);
+  app.get('/index.html', serveAdminIndex);
+
+  app.post('/upload', { preHandler: requireAdminAccess }, async (request, reply) => {
     const file = await request.file();
     if (!file) {
       return reply.code(400).send({ error: 'missing file in multipart field "file"' });
+    }
+
+    if (!file.filename || file.filename.trim().length === 0) {
+      return reply.code(400).send({ error: 'invalid file name' });
+    }
+
+    if (file.filename.length > 255) {
+      return reply.code(400).send({ error: 'file name too long (max 255)' });
     }
 
     const fields = file.fields as Record<string, { value: string }>;
@@ -478,7 +633,11 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   app.get('/f/:token/info', async (request, reply) => {
-    const token = (request.params as { token: string }).token;
+    const token = normalizeToken((request.params as { token?: string }).token);
+    if (!isValidToken(token)) {
+      return reply.code(400).send({ error: 'invalid token' });
+    }
+
     const record = store.get(token);
 
     if (!record) return reply.code(404).send({ error: 'file not found' });
@@ -500,7 +659,14 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   app.get('/s/:token', async (request, reply) => {
-    const token = (request.params as { token: string }).token;
+    const token = normalizeToken((request.params as { token?: string }).token);
+    if (!isValidToken(token)) {
+      return reply
+        .code(400)
+        .type('text/html; charset=utf-8')
+        .send(renderStatusPage('链接无效', '分享链接格式不正确。'));
+    }
+
     const record = store.get(token);
 
     if (!record) {
@@ -543,7 +709,11 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   app.get('/f/:token', async (request, reply) => {
-    const token = (request.params as { token: string }).token;
+    const token = normalizeToken((request.params as { token?: string }).token);
+    if (!isValidToken(token)) {
+      return reply.code(400).send({ error: 'invalid token' });
+    }
+
     const record = store.get(token);
 
     if (!record) return reply.code(404).send({ error: 'file not found' });
@@ -569,24 +739,28 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     const contentType = record.mimeType || 'application/octet-stream';
     reply.header('Content-Type', contentType);
-    reply.header('Content-Disposition', `attachment; filename="${encodeURIComponent(record.originalName)}"`);
+    reply.header('Content-Disposition', toContentDisposition(record.originalName));
     return reply.send(createReadStream(record.filePath));
   });
 
-  app.get('/admin/storage', { preHandler: requireAdminPassword }, async () => {
-    const storage = await getStorageStats(store.getUploadDir());
+  app.get('/admin/storage', { preHandler: requireAdminAccess }, async (_request, reply) => {
+    try {
+      const storage = await getStorageStats(store.getUploadDir());
 
-    return {
-      totalBytes: storage.total,
-      usedBytes: storage.used,
-      availableBytes: storage.available,
-      total: formatBytes(storage.total),
-      used: formatBytes(storage.used),
-      available: formatBytes(storage.available)
-    };
+      return {
+        totalBytes: storage.total,
+        usedBytes: storage.used,
+        availableBytes: storage.available,
+        total: formatBytes(storage.total),
+        used: formatBytes(storage.used),
+        available: formatBytes(storage.available)
+      };
+    } catch {
+      return reply.code(500).send({ error: 'failed to query storage stats' });
+    }
   });
 
-  app.get('/admin/files', { preHandler: requireAdminPassword }, async (request) => {
+  app.get('/admin/files', { preHandler: requireAdminAccess }, async (request) => {
     const records = store.list();
     const baseUrl = getBaseUrl(request);
     const availableFiles: Array<{
@@ -630,8 +804,12 @@ export async function buildApp(): Promise<FastifyInstance> {
     return { files: availableFiles };
   });
 
-  app.delete('/admin/files/:token', { preHandler: requireAdminPassword }, async (request, reply) => {
-    const token = (request.params as { token: string }).token;
+  app.delete('/admin/files/:token', { preHandler: requireAdminAccess }, async (request, reply) => {
+    const token = normalizeToken((request.params as { token?: string }).token);
+    if (!isValidToken(token)) {
+      return reply.code(400).send({ error: 'invalid token' });
+    }
+
     const removed = await store.remove(token);
 
     if (!removed) {
@@ -641,13 +819,27 @@ export async function buildApp(): Promise<FastifyInstance> {
     return reply.code(204).send();
   });
 
-  app.delete('/admin/files', { preHandler: requireAdminPassword }, async (request, reply) => {
+  app.delete('/admin/files', { preHandler: requireAdminAccess }, async (request, reply) => {
     const body = (request.body ?? {}) as { tokens?: unknown };
     if (!Array.isArray(body.tokens)) {
       return reply.code(400).send({ error: 'tokens must be an array' });
     }
 
-    const tokens = [...new Set(body.tokens.filter((item): item is string => typeof item === 'string' && item.trim().length > 0))];
+    if (body.tokens.length > MAX_BATCH_DELETE_TOKENS) {
+      return reply.code(400).send({ error: `too many tokens, max ${MAX_BATCH_DELETE_TOKENS}` });
+    }
+
+    const normalizedTokens = body.tokens
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+
+    const invalidTokens = normalizedTokens.filter((token) => !isValidToken(token));
+    if (invalidTokens.length > 0) {
+      return reply.code(400).send({ error: 'tokens contain invalid values', invalidTokens });
+    }
+
+    const tokens = [...new Set(normalizedTokens)];
     if (tokens.length === 0) {
       return reply.code(400).send({ error: 'tokens array is empty' });
     }

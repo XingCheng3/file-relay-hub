@@ -20,6 +20,7 @@ interface RelayStoreData {
 }
 
 const DEFAULT_DATA: RelayStoreData = { records: [] };
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 
 export class RelayStore {
   private readonly dataFilePath: string;
@@ -37,18 +38,29 @@ export class RelayStore {
     try {
       const raw = await fs.readFile(this.dataFilePath, 'utf-8');
       const parsed = JSON.parse(raw) as RelayStoreData;
-      for (const record of parsed.records ?? []) {
-        this.records.set(record.token, {
-          ...record,
-          createdAt: record.createdAt ?? new Date().toISOString(),
-          expiresAt: record.expiresAt ?? null
-        });
+      const records = Array.isArray(parsed.records) ? parsed.records : [];
+
+      for (const record of records) {
+        const normalized = this.normalizeRecord(record);
+        if (!normalized) continue;
+        this.records.set(normalized.token, normalized);
       }
-    } catch {
-      await this.persist();
+    } catch (error) {
+      const errno = (error as NodeJS.ErrnoException).code;
+      if (errno === 'ENOENT') {
+        await this.persist();
+      } else if (error instanceof SyntaxError) {
+        const backupPath = `${this.dataFilePath}.corrupt-${Date.now()}`;
+        await fs.rename(this.dataFilePath, backupPath).catch(() => undefined);
+        this.records = new Map();
+        await this.persist();
+      } else {
+        throw error;
+      }
     }
 
     await this.cleanupExpired();
+    await this.cleanupReachedDownloadLimit();
   }
 
   makeToken(): string {
@@ -105,7 +117,7 @@ export class RelayStore {
     try {
       await fs.unlink(record.filePath);
     } catch {
-      // ignore
+      // ignore missing disk file
     }
 
     return true;
@@ -119,6 +131,53 @@ export class RelayStore {
     for (const token of expiredTokens) {
       await this.remove(token);
     }
+  }
+
+  async cleanupReachedDownloadLimit(): Promise<void> {
+    const exceededTokens = [...this.records.values()]
+      .filter((item) => this.isDownloadLimitReached(item))
+      .map((item) => item.token);
+
+    for (const token of exceededTokens) {
+      await this.remove(token);
+    }
+  }
+
+  private normalizeRecord(record: RelayFileRecord): RelayFileRecord | null {
+    if (!record || typeof record !== 'object') return null;
+    const token = typeof record.token === 'string' ? record.token.trim() : '';
+    if (!TOKEN_PATTERN.test(token)) return null;
+
+    const createdAtRaw = typeof record.createdAt === 'string' ? record.createdAt : '';
+    const createdAt = Number.isNaN(new Date(createdAtRaw).getTime()) ? new Date().toISOString() : createdAtRaw;
+
+    const expiresAtRaw = typeof record.expiresAt === 'string' ? record.expiresAt : null;
+    const expiresAt = expiresAtRaw && !Number.isNaN(new Date(expiresAtRaw).getTime()) ? expiresAtRaw : null;
+
+    const downloadCount = Number.isFinite(record.downloadCount) && record.downloadCount >= 0
+      ? Math.floor(record.downloadCount)
+      : 0;
+
+    const maxDownloads = Number.isFinite(record.maxDownloads) && Number(record.maxDownloads) >= 1
+      ? Math.floor(Number(record.maxDownloads))
+      : null;
+
+    return {
+      token,
+      originalName: typeof record.originalName === 'string' && record.originalName.trim() ? record.originalName : 'file.bin',
+      storedName: typeof record.storedName === 'string' ? record.storedName : '',
+      filePath: typeof record.filePath === 'string' && record.filePath.trim()
+        ? record.filePath
+        : path.join(this.uploadDir, typeof record.storedName === 'string' ? record.storedName : ''),
+      size: Number.isFinite(record.size) && Number(record.size) >= 0 ? Number(record.size) : 0,
+      mimeType: typeof record.mimeType === 'string' && record.mimeType.trim()
+        ? record.mimeType
+        : 'application/octet-stream',
+      createdAt,
+      expiresAt,
+      downloadCount,
+      maxDownloads
+    };
   }
 
   private async persist(): Promise<void> {

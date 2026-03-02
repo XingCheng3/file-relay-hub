@@ -13,11 +13,15 @@
 - 可选最大下载次数（到达后链接失效）
 - 本地磁盘存储（`data/uploads`）
 - 管理接口（密码保护）：
-  - 获取“未过期可用文件清单”（含创建时间 `createdAt`）
+  - 获取“未过期可用文件清单”（字段：`createdAt` / `expiresAt` / `downloadCount` / `maxDownloads`）
   - 查询上传目录所在分区磁盘空间（总量/已使用/可用）
   - 单文件删除
   - 批量删除
-- 页面访问密码保护：主页与管理操作需提供 `x-admin-password`
+- 访问控制：
+  - `GET /`、`GET /index.html`、`POST /upload`、`/admin/*` 统一后端鉴权
+  - 支持 `x-admin-password` 请求头（API 场景）
+  - 支持登录后 HttpOnly 会话 Cookie（Web UI 场景）
+  - 分享下载链接（`/f/:token`、`/s/:token`）保持公开
 - 磁盘保护策略：上传后仍至少保留 5GB 可用空间（否则拒绝/回滚上传）
 - 不限制文件类型、不做网速限流（当前版本）
 
@@ -38,6 +42,8 @@ npm run dev
 - `PORT`（默认 `3000`）
 - `CLEANUP_INTERVAL_MINUTES`（默认 `10`，后台清理过期文件的间隔）
 - `ADMIN_PASSWORD`（默认 `17734`，页面/API 管理密码）
+- `ADMIN_SESSION_TTL_HOURS`（默认 `12`，登录会话有效期）
+- `ADMIN_SESSION_SECRET`（可选，会话签名密钥，建议生产环境设置）
 
 ## API
 
@@ -49,11 +55,29 @@ GET /health
 
 ### 访问控制
 
-- 主页 `GET /`、上传 `POST /upload`、管理接口 `GET/DELETE /admin/*` 需要密码。
-- Web UI 会先输入密码并保存到 `sessionStorage`，后续请求自动携带 `x-admin-password`。
-- 预览/下载分享链接（`/s/:token`、`/f/:token`）保持公开，不受该密码拦截。
+- 受保护：`GET /`、`GET /index.html`、`POST /upload`、`/admin/*`
+- 公开：`GET /f/:token`、`GET /f/:token/info`、`GET /s/:token`
 
-### 上传文件
+### 登录 / 退出（Web UI）
+
+```http
+POST /admin/login
+Content-Type: application/json
+
+{
+  "password": "***"
+}
+```
+
+成功后服务端设置 HttpOnly Cookie，会话用于后续管理请求。
+
+```http
+POST /admin/logout
+```
+
+清除会话 Cookie。
+
+### 上传文件（需鉴权）
 
 ```http
 POST /upload
@@ -68,7 +92,7 @@ Content-Type: multipart/form-data
 - `maxDownloads`：最大下载次数（可选）
 
 过期时间规则：
-- 过期时间输入框有数值时，一定会计算 `expiresAt`（不会退化成“永不过期”）
+- 过期时间输入框有数值时，一定会计算 `expiresAt`
 - 留空时 `expiresAt = null`，表示不过期
 
 返回示例：
@@ -83,29 +107,27 @@ Content-Type: multipart/form-data
 }
 ```
 
-> `expiresAt = null` 表示永久链接（不过期）。
-
-### 下载预览页
+### 下载预览页（公开）
 
 ```http
 GET /s/:token
 ```
 
-返回 HTML 页面，显示文件名、文件大小、过期时间（或“永不过期”）、下载次数，并提供下载按钮。
+返回 HTML 页面，显示文件名、文件大小、过期时间、下载统计（当前下载次数 / 最大下载次数）。
 
-### 下载文件
+### 下载文件（公开）
 
 ```http
 GET /f/:token
 ```
 
-### 查询文件信息
+### 查询文件信息（公开）
 
 ```http
 GET /f/:token/info
 ```
 
-## 管理接口（需 `x-admin-password`）
+## 管理接口（需鉴权）
 
 ### 查询存储空间
 
@@ -126,7 +148,7 @@ GET /admin/storage
 }
 ```
 
-### 获取当前可用文件列表（仅未过期，含创建时间）
+### 获取当前可用文件列表（仅未过期）
 
 ```http
 GET /admin/files
@@ -151,6 +173,12 @@ GET /admin/files
   ]
 }
 ```
+
+字段说明：
+- `createdAt`：文件创建时间
+- `expiresAt`：过期时间，`null` 表示不过期
+- `downloadCount`：当前已下载次数
+- `maxDownloads`：最大下载次数，`null` 表示不限
 
 ### 删除指定文件
 
@@ -216,5 +244,5 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ## 注意
 
-- 当前版本使用单一管理密码（默认 `17734`），生产环境请务必通过环境变量设置强密码，并配合额外访问控制。
-- 生产环境建议加：细粒度鉴权、限流、HTTPS、对象存储、审计日志。
+- 当前版本使用单一管理密码（默认 `17734`），生产环境请务必通过环境变量设置强密码。
+- 强烈建议生产环境额外开启：HTTPS、IP 访问限制、限流、审计日志。
