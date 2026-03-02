@@ -26,6 +26,7 @@ export class RelayStore {
   private readonly dataFilePath: string;
   private readonly uploadDir: string;
   private records = new Map<string, RelayFileRecord>();
+  private persistQueue: Promise<void> = Promise.resolve();
 
   constructor(baseDir: string) {
     this.uploadDir = path.join(baseDir, 'uploads');
@@ -216,10 +217,19 @@ export class RelayStore {
     return resolved;
   }
 
-  private async persist(): Promise<void> {
+  private persist(): Promise<void> {
     const data: RelayStoreData = {
       records: [...this.records.values()]
     };
-    await fs.writeFile(this.dataFilePath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+    const payload = JSON.stringify(data, null, 2) + '\n';
+    const tempPath = `${this.dataFilePath}.tmp`;
+
+    const writeTask = this.persistQueue.then(async () => {
+      await fs.writeFile(tempPath, payload, 'utf-8');
+      await fs.rename(tempPath, this.dataFilePath);
+    });
+
+    this.persistQueue = writeTask.catch(() => undefined);
+    return writeTask;
   }
 }
