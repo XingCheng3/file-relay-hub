@@ -15,6 +15,8 @@
 - 管理接口（密码保护）：
   - 获取“未过期可用文件清单”（字段：`createdAt` / `expiresAt` / `downloadCount` / `maxDownloads`）
   - 查询上传目录所在分区磁盘空间（总量/已使用/可用）
+  - 查询当前服务版本（用于确认前端是否最新）
+  - 手动清理已过期记录
   - 单文件删除
   - 批量删除
 - 访问控制：
@@ -41,9 +43,11 @@ npm run dev
 - `HOST`（默认 `0.0.0.0`）
 - `PORT`（默认 `3000`）
 - `CLEANUP_INTERVAL_MINUTES`（默认 `10`，后台清理过期文件的间隔）
-- `ADMIN_PASSWORD`（默认 `17734`，页面/API 管理密码）
+- `ADMIN_PASSWORD`（必填，无默认值；页面/API 管理密码）
 - `ADMIN_SESSION_TTL_HOURS`（默认 `12`，登录会话有效期）
 - `ADMIN_SESSION_SECRET`（可选，会话签名密钥，建议生产环境设置）
+
+> 未设置 `ADMIN_PASSWORD` 时服务会在启动阶段直接报错并退出。
 
 ## API
 
@@ -148,6 +152,34 @@ GET /admin/storage
 }
 ```
 
+### 查询当前服务版本
+
+```http
+GET /admin/version
+```
+
+返回示例：
+
+```json
+{
+  "version": "v0.1.0+abc1234"
+}
+```
+
+### 清理已过期记录
+
+```http
+POST /admin/cleanup-expired
+```
+
+返回示例：
+
+```json
+{
+  "cleanedCount": 3
+}
+```
+
 ### 获取当前可用文件列表（仅未过期）
 
 ```http
@@ -244,5 +276,5 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ## 注意
 
-- 当前版本使用单一管理密码（默认 `17734`），生产环境请务必通过环境变量设置强密码。
+- 当前版本使用单一管理密码，且必须通过 `ADMIN_PASSWORD` 环境变量显式配置强密码。
 - 强烈建议生产环境额外开启：HTTPS、IP 访问限制、限流、审计日志。

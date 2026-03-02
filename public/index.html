@@ -33,7 +33,7 @@
       th { color: #c9d3ea; font-size: 13px; }
       td { color: #e8ecf3; font-size: 14px; }
       .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-      .toolbar .muted { margin-left: auto; }
+      #selected-count { margin-left: auto; }
       .empty { padding: 16px 6px; color: #8ea0c8; }
       .ops { display: flex; gap: 8px; align-items: center; }
       .ops a { color: #8ab4ff; text-decoration: none; }
@@ -55,6 +55,18 @@
       .metric .label { color: #9db0d8; font-size: 12px; margin-bottom: 4px; }
       .metric .value { font-size: 16px; font-weight: 600; }
       .metric .sub { color: #8ea0c8; font-size: 12px; margin-top: 2px; }
+      .corner-version {
+        position: fixed;
+        right: 12px;
+        bottom: 10px;
+        font-size: 12px;
+        color: #8ea0c8;
+        background: rgba(11, 16, 32, 0.75);
+        border: 1px solid #2a365e;
+        border-radius: 999px;
+        padding: 4px 10px;
+        backdrop-filter: blur(2px);
+      }
     </style>
   </head>
   <body>
@@ -124,7 +136,9 @@
         <h2>共享文件清单（未过期）</h2>
         <div class="toolbar">
           <button id="refresh-btn" class="button-ghost" type="button">刷新</button>
+          <button id="cleanup-expired-btn" class="button-ghost" type="button">清理已过期记录</button>
           <button id="delete-selected-btn" class="button-danger" type="button" disabled>删除选中</button>
+          <span class="muted" id="cleanup-status"></span>
           <span class="muted" id="selected-count">已选 0 项</span>
         </div>
 
@@ -146,6 +160,7 @@
         </div>
       </div>
     </div>
+    <div id="app-version" class="corner-version">版本 -</div>
 
     <script>
       const form = document.getElementById('upload-form');
@@ -171,9 +186,12 @@
 
       const filesTbodyEl = document.getElementById('files-tbody');
       const refreshBtnEl = document.getElementById('refresh-btn');
+      const cleanupExpiredBtnEl = document.getElementById('cleanup-expired-btn');
+      const cleanupStatusEl = document.getElementById('cleanup-status');
       const selectAllEl = document.getElementById('select-all');
       const deleteSelectedBtnEl = document.getElementById('delete-selected-btn');
       const selectedCountEl = document.getElementById('selected-count');
+      const appVersionEl = document.getElementById('app-version');
 
       const selectedTokens = new Set();
       let currentFiles = [];
@@ -329,6 +347,21 @@
         }
       }
 
+      async function refreshVersion() {
+        if (!appVersionEl) return;
+        try {
+          const res = await adminFetch('/admin/version');
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(data.error || '获取版本失败');
+          }
+
+          appVersionEl.textContent = `版本 ${data.version || '-'}`;
+        } catch {
+          appVersionEl.textContent = '版本 -';
+        }
+      }
+
       async function refreshFileList() {
         filesTbodyEl.innerHTML = '<tr><td class="loading" colspan="7">加载中...</td></tr>';
         try {
@@ -444,7 +477,29 @@
       });
 
       refreshBtnEl.addEventListener('click', () => {
+        if (cleanupStatusEl) cleanupStatusEl.textContent = '';
         void Promise.all([refreshStorage(), refreshFileList()]);
+      });
+
+      cleanupExpiredBtnEl.addEventListener('click', async () => {
+        if (cleanupStatusEl) cleanupStatusEl.textContent = '清理中...';
+        cleanupExpiredBtnEl.disabled = true;
+
+        try {
+          const res = await adminFetch('/admin/cleanup-expired', { method: 'POST' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(data.error || '清理过期记录失败');
+          }
+
+          const cleanedCount = Number.isFinite(data.cleanedCount) ? data.cleanedCount : 0;
+          if (cleanupStatusEl) cleanupStatusEl.textContent = `已清理 ${cleanedCount} 条过期记录`;
+          await Promise.all([refreshStorage(), refreshFileList()]);
+        } catch (err) {
+          if (cleanupStatusEl) cleanupStatusEl.textContent = err?.message || '清理过期记录失败';
+        } finally {
+          cleanupExpiredBtnEl.disabled = false;
+        }
       });
 
       filesTbodyEl.addEventListener('change', (e) => {
@@ -513,7 +568,7 @@
       });
 
       updateExpireInputLimit();
-      void Promise.all([refreshStorage(), refreshFileList()]);
+      void Promise.all([refreshStorage(), refreshFileList(), refreshVersion()]);
     </script>
   </body>
 </html>

@@ -11,8 +11,17 @@ import { RelayStore, RelayFileRecord } from './relay-store';
 const RESERVED_FREE_SPACE_BYTES = 5 * 1024 * 1024 * 1024; // keep 5GB free
 const MAX_EXPIRES_HOURS = 24 * 7;
 const DEFAULT_CLEANUP_INTERVAL_MINUTES = 10;
-const DEFAULT_ADMIN_PASSWORD = '17734';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim() || DEFAULT_ADMIN_PASSWORD;
+const APP_VERSION_FALLBACK = '0.0.0';
+
+function getRequiredAdminPassword(): string {
+  const value = process.env.ADMIN_PASSWORD?.trim() ?? '';
+  if (!value) {
+    throw new Error('ADMIN_PASSWORD is required. Refusing to start with empty admin password.');
+  }
+  return value;
+}
+
+const ADMIN_PASSWORD = getRequiredAdminPassword();
 const ADMIN_SESSION_COOKIE_NAME = 'fileRelayHubAdminSession';
 const ADMIN_SESSION_TTL_HOURS = Math.max(1, Number(process.env.ADMIN_SESSION_TTL_HOURS ?? 12));
 const ADMIN_SESSION_MAX_AGE_SECONDS = Math.floor(ADMIN_SESSION_TTL_HOURS * 60 * 60);
@@ -33,6 +42,26 @@ async function getStorageStats(targetDir: string): Promise<{ total: number; used
 async function getAvailableBytes(targetDir: string): Promise<number> {
   const storage = await getStorageStats(targetDir);
   return storage.available;
+}
+
+async function resolveAppVersion(): Promise<string> {
+  let version = APP_VERSION_FALLBACK;
+
+  try {
+    const packageJsonPath = path.join(process.cwd(), 'package.json');
+    const raw = await fs.readFile(packageJsonPath, 'utf-8');
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    if (typeof parsed.version === 'string' && parsed.version.trim()) {
+      version = parsed.version.trim();
+    }
+  } catch {
+    // keep fallback version
+  }
+
+  const commitRaw = process.env.APP_COMMIT?.trim() || process.env.GIT_COMMIT?.trim() || '';
+  const shortCommit = commitRaw ? commitRaw.slice(0, 7) : '';
+
+  return shortCommit ? `v${version}+${shortCommit}` : `v${version}`;
 }
 
 function extractAdminPassword(headers: Record<string, unknown>): string {
@@ -442,6 +471,7 @@ function renderLoginPage(message = ''): string {
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
+  const appVersion = await resolveAppVersion();
 
   const dataDir = path.join(process.cwd(), 'data');
   const store = new RelayStore(dataDir);
@@ -511,6 +541,10 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.post('/admin/logout', async (request, reply) => {
     clearAdminSessionCookie(reply, request);
     return reply.code(204).send();
+  });
+
+  app.get('/admin/version', { preHandler: requireAdminAccess }, async () => {
+    return { version: appVersion };
   });
 
   const serveAdminIndex = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -758,6 +792,11 @@ export async function buildApp(): Promise<FastifyInstance> {
     } catch {
       return reply.code(500).send({ error: 'failed to query storage stats' });
     }
+  });
+
+  app.post('/admin/cleanup-expired', { preHandler: requireAdminAccess }, async () => {
+    const cleanedCount = await store.cleanupExpired();
+    return { cleanedCount };
   });
 
   app.get('/admin/files', { preHandler: requireAdminAccess }, async (request) => {

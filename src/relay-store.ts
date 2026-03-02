@@ -123,7 +123,7 @@ export class RelayStore {
     return true;
   }
 
-  async cleanupExpired(): Promise<void> {
+  async cleanupExpired(): Promise<number> {
     const expiredTokens = [...this.records.values()]
       .filter((item) => this.isExpired(item))
       .map((item) => item.token);
@@ -131,6 +131,8 @@ export class RelayStore {
     for (const token of expiredTokens) {
       await this.remove(token);
     }
+
+    return expiredTokens.length;
   }
 
   async cleanupReachedDownloadLimit(): Promise<void> {
