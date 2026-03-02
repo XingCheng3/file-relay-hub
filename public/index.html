@@ -25,6 +25,22 @@
       .link { word-break: break-all; display: block; margin-top: 8px; color: #8ab4ff; }
       .muted { font-size: 12px; color: #8ea0c8; }
       .error { color: #ff8d8d; margin-top: 10px; }
+      .upload-progress { margin-top: 10px; }
+      .upload-progress-bar {
+        width: 100%;
+        height: 10px;
+        background: #0b1020;
+        border: 1px solid #3a4b7e;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .upload-progress-fill {
+        width: 0%;
+        height: 100%;
+        background: linear-gradient(90deg, #4f7cff, #59d2ff);
+        transition: width .12s linear;
+      }
+      .upload-progress-text { margin-top: 6px; font-size: 12px; color: #9db0d8; }
       .ok { color: #83f4aa; }
       .expire-row { display: grid; grid-template-columns: 1fr 140px; gap: 10px; align-items: end; }
       .table-wrap { overflow-x: auto; margin-top: 10px; }
@@ -121,6 +137,12 @@
           <input id="maxDownloads" name="maxDownloads" type="number" min="1" placeholder="留空表示不限" />
 
           <button id="submit-btn" type="submit">上传并生成链接</button>
+          <div id="upload-progress" class="upload-progress" style="display:none">
+            <div class="upload-progress-bar">
+              <div id="upload-progress-fill" class="upload-progress-fill"></div>
+            </div>
+            <div id="upload-progress-text" class="upload-progress-text">上传中 0%</div>
+          </div>
           <div id="error" class="error"></div>
         </form>
 
@@ -174,6 +196,9 @@
       const expiresUnitEl = document.getElementById('expiresUnit');
       const expiresHintEl = document.getElementById('expiresHint');
       const logoutBtnEl = document.getElementById('logout-btn');
+      const uploadProgressEl = document.getElementById('upload-progress');
+      const uploadProgressFillEl = document.getElementById('upload-progress-fill');
+      const uploadProgressTextEl = document.getElementById('upload-progress-text');
 
       const storageStatusEl = document.getElementById('storage-status');
       const storageGridEl = document.getElementById('storage-grid');
@@ -257,6 +282,90 @@
         }
 
         return response;
+      }
+
+      function resetUploadProgress() {
+        if (!uploadProgressEl || !uploadProgressFillEl || !uploadProgressTextEl) return;
+        uploadProgressFillEl.style.width = '0%';
+        uploadProgressTextEl.textContent = '上传中 0%';
+        uploadProgressEl.style.display = 'none';
+      }
+
+      function updateUploadProgress(loaded, total) {
+        if (!uploadProgressEl || !uploadProgressFillEl || !uploadProgressTextEl) return;
+        uploadProgressEl.style.display = 'block';
+
+        if (Number.isFinite(total) && total > 0) {
+          const percent = Math.min(100, Math.max(0, Math.round((loaded / total) * 100)));
+          uploadProgressFillEl.style.width = `${percent}%`;
+          uploadProgressTextEl.textContent = `上传中 ${percent}%`;
+          return;
+        }
+
+        uploadProgressFillEl.style.width = '0%';
+        uploadProgressTextEl.textContent = '上传中...';
+      }
+
+      function parseXhrJson(xhr) {
+        if (xhr.response && typeof xhr.response === 'object') {
+          return xhr.response;
+        }
+
+        const raw = typeof xhr.responseText === 'string' ? xhr.responseText : '';
+        if (!raw) return {};
+
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return {};
+        }
+      }
+
+      function uploadWithProgress(formData) {
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', '/upload');
+          xhr.withCredentials = true;
+
+          xhr.upload.addEventListener('loadstart', () => {
+            updateUploadProgress(0, 1);
+          });
+
+          xhr.upload.addEventListener('progress', (event) => {
+            if (event.lengthComputable) {
+              updateUploadProgress(event.loaded, event.total);
+            } else {
+              updateUploadProgress(1, 0);
+            }
+          });
+
+          xhr.addEventListener('load', () => {
+            const data = parseXhrJson(xhr);
+
+            if (xhr.status === 401) {
+              window.location.href = '/';
+              reject(new Error('unauthorized'));
+              return;
+            }
+
+            if (xhr.status < 200 || xhr.status >= 300) {
+              reject(new Error(data.error || '上传失败'));
+              return;
+            }
+
+            resolve(data);
+          });
+
+          xhr.addEventListener('error', () => {
+            reject(new Error('网络异常，上传失败'));
+          });
+
+          xhr.addEventListener('abort', () => {
+            reject(new Error('上传已取消'));
+          });
+
+          xhr.send(formData);
+        });
       }
 
       function updateExpireInputLimit() {
@@ -454,12 +563,7 @@
         submitBtn.textContent = '上传中...';
 
         try {
-          const res = await adminFetch('/upload', { method: 'POST', body: fd });
-          const data = await res.json().catch(() => ({}));
-
-          if (!res.ok) {
-            throw new Error(data.error || '上传失败');
-          }
+          const data = await uploadWithProgress(fd);
 
           tokenEl.textContent = data.token;
           expiresEl.textContent = formatExpiresTime(data.expiresAt);
@@ -469,8 +573,11 @@
 
           await Promise.all([refreshStorage(), refreshFileList()]);
         } catch (err) {
-          errorEl.textContent = err?.message || '上传失败';
+          if (err?.message !== 'unauthorized') {
+            errorEl.textContent = err?.message || '上传失败';
+          }
         } finally {
+          resetUploadProgress();
           submitBtn.disabled = false;
           submitBtn.textContent = '上传并生成链接';
         }
@@ -568,6 +675,7 @@
       });
 
       updateExpireInputLimit();
+      resetUploadProgress();
       void Promise.all([refreshStorage(), refreshFileList(), refreshVersion()]);
     </script>
   </body>

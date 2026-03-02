@@ -12,6 +12,7 @@ const RESERVED_FREE_SPACE_BYTES = 5 * 1024 * 1024 * 1024; // keep 5GB free
 const MAX_EXPIRES_HOURS = 24 * 7;
 const DEFAULT_CLEANUP_INTERVAL_MINUTES = 10;
 const APP_VERSION_FALLBACK = '0.0.0';
+const MULTIPART_MAX_FILE_SIZE_BYTES = Number.POSITIVE_INFINITY;
 
 function getRequiredAdminPassword(): string {
   const value = process.env.ADMIN_PASSWORD?.trim() ?? '';
@@ -498,8 +499,10 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   await app.register(multipart, {
+    throwFileSizeLimit: false,
     limits: {
-      files: 1
+      files: 1,
+      fileSize: MULTIPART_MAX_FILE_SIZE_BYTES
     }
   });
 
@@ -627,7 +630,20 @@ export async function buildApp(): Promise<FastifyInstance> {
     }
 
     try {
-      await pipeline(file.file, createWriteStream(filePath));
+      const uploadStream = file.file as typeof file.file & { truncated?: boolean };
+      let streamWasTruncated = false;
+      uploadStream.once('limit', () => {
+        streamWasTruncated = true;
+      });
+
+      await pipeline(uploadStream, createWriteStream(filePath));
+
+      if (streamWasTruncated || uploadStream.truncated) {
+        await fs.unlink(filePath).catch(() => undefined);
+        return reply.code(413).send({
+          error: 'upload truncated by multipart limit; file has been discarded'
+        });
+      }
 
       const stat = await fs.stat(filePath);
       const freeAfterUpload = await getAvailableBytes(store.getUploadDir());
@@ -910,6 +926,12 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOSPC') {
       return reply.code(507).send({ error: 'insufficient disk space on server' });
+    }
+
+    if (error instanceof Error && 'code' in error && (error as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') {
+      return reply.code(413).send({
+        error: 'upload truncated by multipart limit; file has been discarded'
+      });
     }
 
     app.log.error(error);
