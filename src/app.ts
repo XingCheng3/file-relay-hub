@@ -7,9 +7,14 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { RelayStore } from './relay-store';
 
-const MAX_FILE_SIZE = 1024 * 1024 * 1024; // 1 GB
+const RESERVED_FREE_SPACE_BYTES = 5 * 1024 * 1024 * 1024; // keep 5GB free
 const DEFAULT_EXPIRES_HOURS = 24;
 const MAX_EXPIRES_HOURS = 24 * 7;
+
+async function getAvailableBytes(targetDir: string): Promise<number> {
+  const stats = await fs.statfs(targetDir);
+  return stats.bavail * stats.bsize;
+}
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
@@ -20,7 +25,6 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   await app.register(multipart, {
     limits: {
-      fileSize: MAX_FILE_SIZE,
       files: 1
     }
   });
@@ -63,9 +67,23 @@ export async function buildApp(): Promise<FastifyInstance> {
     const storedName = store.makeStoredName(file.filename);
     const filePath = path.join(store.getUploadDir(), storedName);
 
+    const freeBeforeUpload = await getAvailableBytes(store.getUploadDir());
+    if (freeBeforeUpload <= RESERVED_FREE_SPACE_BYTES) {
+      return reply.code(507).send({
+        error: 'insufficient disk space: server keeps at least 5GB free'
+      });
+    }
+
     await pipeline(file.file, createWriteStream(filePath));
 
     const stat = await fs.stat(filePath);
+    const freeAfterUpload = await getAvailableBytes(store.getUploadDir());
+    if (freeAfterUpload < RESERVED_FREE_SPACE_BYTES) {
+      await fs.unlink(filePath).catch(() => undefined);
+      return reply.code(507).send({
+        error: 'insufficient disk space after upload: file removed to keep 5GB free'
+      });
+    }
     const now = new Date();
     const expiresAt = new Date(now.getTime() + expiresInHours * 60 * 60 * 1000);
 
@@ -148,8 +166,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   app.setErrorHandler((error, _request, reply) => {
-    if (error instanceof Error && error.message.includes('File too large')) {
-      return reply.code(413).send({ error: 'file too large (max 1GB)' });
+    if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOSPC') {
+      return reply.code(507).send({ error: 'insufficient disk space on server' });
     }
 
     app.log.error(error);
