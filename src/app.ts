@@ -626,44 +626,49 @@ export async function buildApp(): Promise<FastifyInstance> {
       });
     }
 
-    await pipeline(file.file, createWriteStream(filePath));
+    try {
+      await pipeline(file.file, createWriteStream(filePath));
 
-    const stat = await fs.stat(filePath);
-    const freeAfterUpload = await getAvailableBytes(store.getUploadDir());
-    if (freeAfterUpload < RESERVED_FREE_SPACE_BYTES) {
-      await fs.unlink(filePath).catch(() => undefined);
-      return reply.code(507).send({
-        error: 'insufficient disk space after upload: file removed to keep 5GB free'
+      const stat = await fs.stat(filePath);
+      const freeAfterUpload = await getAvailableBytes(store.getUploadDir());
+      if (freeAfterUpload < RESERVED_FREE_SPACE_BYTES) {
+        await fs.unlink(filePath).catch(() => undefined);
+        return reply.code(507).send({
+          error: 'insufficient disk space after upload: file removed to keep 5GB free'
+        });
+      }
+
+      const now = new Date();
+      const expiresAt = expiresInHours === null
+        ? null
+        : new Date(now.getTime() + expiresInHours * 60 * 60 * 1000).toISOString();
+
+      await store.create({
+        token,
+        originalName: file.filename,
+        storedName,
+        filePath,
+        size: stat.size,
+        mimeType: file.mimetype || 'application/octet-stream',
+        createdAt: now.toISOString(),
+        expiresAt,
+        downloadCount: 0,
+        maxDownloads
       });
+
+      const baseUrl = getBaseUrl(request);
+
+      return reply.code(201).send({
+        token,
+        downloadUrl: `${baseUrl}/f/${token}`,
+        previewUrl: `${baseUrl}/s/${token}`,
+        expiresAt,
+        maxDownloads
+      });
+    } catch (error) {
+      await fs.unlink(filePath).catch(() => undefined);
+      throw error;
     }
-
-    const now = new Date();
-    const expiresAt = expiresInHours === null
-      ? null
-      : new Date(now.getTime() + expiresInHours * 60 * 60 * 1000).toISOString();
-
-    await store.create({
-      token,
-      originalName: file.filename,
-      storedName,
-      filePath,
-      size: stat.size,
-      mimeType: file.mimetype || 'application/octet-stream',
-      createdAt: now.toISOString(),
-      expiresAt,
-      downloadCount: 0,
-      maxDownloads
-    });
-
-    const baseUrl = getBaseUrl(request);
-
-    return reply.code(201).send({
-      token,
-      downloadUrl: `${baseUrl}/f/${token}`,
-      previewUrl: `${baseUrl}/s/${token}`,
-      expiresAt,
-      maxDownloads
-    });
   });
 
   app.get('/f/:token/info', async (request, reply) => {

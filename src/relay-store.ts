@@ -19,8 +19,8 @@ interface RelayStoreData {
   records: RelayFileRecord[];
 }
 
-const DEFAULT_DATA: RelayStoreData = { records: [] };
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+const STORED_NAME_PATTERN = /^[A-Za-z0-9._-]{1,200}$/;
 
 export class RelayStore {
   private readonly dataFilePath: string;
@@ -77,7 +77,12 @@ export class RelayStore {
   }
 
   async create(record: RelayFileRecord): Promise<void> {
-    this.records.set(record.token, record);
+    const normalized = this.normalizeRecord(record);
+    if (!normalized) {
+      throw new Error('invalid relay file record');
+    }
+
+    this.records.set(normalized.token, normalized);
     await this.persist();
   }
 
@@ -150,6 +155,12 @@ export class RelayStore {
     const token = typeof record.token === 'string' ? record.token.trim() : '';
     if (!TOKEN_PATTERN.test(token)) return null;
 
+    const storedName = this.normalizeStoredName(record);
+    if (!storedName) return null;
+
+    const filePath = this.resolveUploadFilePath(storedName);
+    if (!filePath) return null;
+
     const createdAtRaw = typeof record.createdAt === 'string' ? record.createdAt : '';
     const createdAt = Number.isNaN(new Date(createdAtRaw).getTime()) ? new Date().toISOString() : createdAtRaw;
 
@@ -167,10 +178,8 @@ export class RelayStore {
     return {
       token,
       originalName: typeof record.originalName === 'string' && record.originalName.trim() ? record.originalName : 'file.bin',
-      storedName: typeof record.storedName === 'string' ? record.storedName : '',
-      filePath: typeof record.filePath === 'string' && record.filePath.trim()
-        ? record.filePath
-        : path.join(this.uploadDir, typeof record.storedName === 'string' ? record.storedName : ''),
+      storedName,
+      filePath,
       size: Number.isFinite(record.size) && Number(record.size) >= 0 ? Number(record.size) : 0,
       mimeType: typeof record.mimeType === 'string' && record.mimeType.trim()
         ? record.mimeType
@@ -180,6 +189,31 @@ export class RelayStore {
       downloadCount,
       maxDownloads
     };
+  }
+
+  private normalizeStoredName(record: RelayFileRecord): string | null {
+    const fromStoredName = typeof record.storedName === 'string' ? record.storedName.trim() : '';
+    const fromFilePath = typeof record.filePath === 'string' ? path.basename(record.filePath.trim()) : '';
+    const candidate = fromStoredName || fromFilePath;
+    if (!candidate) return null;
+
+    const baseName = path.basename(candidate);
+    if (baseName !== candidate) return null;
+    if (!STORED_NAME_PATTERN.test(baseName)) return null;
+
+    return baseName;
+  }
+
+  private resolveUploadFilePath(storedName: string): string | null {
+    const uploadDir = path.resolve(this.uploadDir);
+    const resolved = path.resolve(uploadDir, storedName);
+    const relative = path.relative(uploadDir, resolved);
+
+    if (relative.startsWith('..') || path.isAbsolute(relative) || relative === '') {
+      return null;
+    }
+
+    return resolved;
   }
 
   private async persist(): Promise<void> {

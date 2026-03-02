@@ -22,7 +22,9 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/public ./public
 
-RUN mkdir -p /app/data/uploads && chown -R node:node /app
+RUN npm prune --omit=dev \
+    && mkdir -p /app/data/uploads \
+    && chown -R node:node /app
 USER node
 
 EXPOSE 3000
