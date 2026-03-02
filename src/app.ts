@@ -1,4 +1,4 @@
-import Fastify, { FastifyInstance } from 'fastify';
+import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { createWriteStream, createReadStream } from 'node:fs';
@@ -10,10 +10,30 @@ import { RelayStore, RelayFileRecord } from './relay-store';
 const RESERVED_FREE_SPACE_BYTES = 5 * 1024 * 1024 * 1024; // keep 5GB free
 const MAX_EXPIRES_HOURS = 24 * 7;
 const DEFAULT_CLEANUP_INTERVAL_MINUTES = 10;
+const DEFAULT_ADMIN_PASSWORD = '17734';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim() || DEFAULT_ADMIN_PASSWORD;
+
+async function getStorageStats(targetDir: string): Promise<{ total: number; used: number; available: number }> {
+  const stats = await fs.statfs(targetDir);
+  const total = stats.blocks * stats.bsize;
+  const available = stats.bavail * stats.bsize;
+  const used = Math.max(total - available, 0);
+  return { total, used, available };
+}
 
 async function getAvailableBytes(targetDir: string): Promise<number> {
-  const stats = await fs.statfs(targetDir);
-  return stats.bavail * stats.bsize;
+  const storage = await getStorageStats(targetDir);
+  return storage.available;
+}
+
+function extractAdminPassword(headers: Record<string, unknown>): string {
+  const raw = headers['x-admin-password'];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function isAuthorizedAdminRequest(request: { headers: Record<string, unknown> }): boolean {
+  return extractAdminPassword(request.headers) === ADMIN_PASSWORD;
 }
 
 function escapeHtml(input: string): string {
@@ -64,6 +84,7 @@ function renderPageShell(content: string): string {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>File Relay Hub</title>
     <style>
       :root { color-scheme: light dark; }
@@ -189,6 +210,122 @@ function renderStatusPage(title: string, message: string): string {
   `);
 }
 
+function renderLoginPage(message = ''): string {
+  const safeMessage = escapeHtml(message);
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>File Relay Hub - 访问验证</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        margin: 0;
+        background: radial-gradient(circle at 20% 20%, #152448 0, #0b1020 45%, #050810 100%);
+        color: #e8ecf3;
+      }
+      .wrap { max-width: 480px; margin: 72px auto; padding: 0 16px; }
+      .card {
+        background: #141b31;
+        border: 1px solid #2a365e;
+        border-radius: 16px;
+        padding: 22px;
+        box-shadow: 0 12px 30px rgba(0,0,0,.28);
+      }
+      h1 { margin: 0 0 10px; font-size: 22px; }
+      .muted { color: #9db0d8; margin: 0 0 14px; }
+      label { display: block; margin: 10px 0 6px; color: #c9d3ea; font-size: 14px; }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 10px;
+        border-radius: 10px;
+        border: 1px solid #3a4b7e;
+        background: #0f1630;
+        color: #e8ecf3;
+      }
+      button {
+        margin-top: 12px;
+        width: 100%;
+        border: none;
+        border-radius: 10px;
+        background: #4f7cff;
+        color: #fff;
+        font-weight: 600;
+        padding: 11px 16px;
+        cursor: pointer;
+      }
+      .error { color: #ff8d8d; min-height: 20px; margin-top: 10px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>🔐 请输入访问密码</h1>
+        <p class="muted">通过验证后才能进入 File Relay Hub 管理页面。</p>
+        <form id="login-form">
+          <label for="password">访问密码</label>
+          <input id="password" type="password" autocomplete="current-password" required />
+          <button type="submit">进入</button>
+          <div id="error" class="error">${safeMessage}</div>
+        </form>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var STORAGE_KEY = 'fileRelayHubAdminPassword';
+        var form = document.getElementById('login-form');
+        var input = document.getElementById('password');
+        var errorEl = document.getElementById('error');
+
+        async function tryEnter(password) {
+          const res = await fetch('/', {
+            headers: { 'x-admin-password': password }
+          });
+
+          if (!res.ok) {
+            throw new Error('密码错误，请重试');
+          }
+
+          sessionStorage.setItem(STORAGE_KEY, password);
+          const html = await res.text();
+          document.open();
+          document.write(html);
+          document.close();
+        }
+
+        var cached = (sessionStorage.getItem(STORAGE_KEY) || '').trim();
+        if (cached) {
+          tryEnter(cached).catch(function () {
+            sessionStorage.removeItem(STORAGE_KEY);
+          });
+        }
+
+        if (!form || !input) return;
+        form.addEventListener('submit', function (e) {
+          e.preventDefault();
+          var password = input.value.trim();
+          if (!password) {
+            if (errorEl) errorEl.textContent = '请输入密码';
+            return;
+          }
+
+          tryEnter(password).catch(function (err) {
+            if (errorEl) errorEl.textContent = (err && err.message) || '验证失败';
+            input.focus();
+            input.select();
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>`;
+}
+
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
 
@@ -220,6 +357,12 @@ export async function buildApp(): Promise<FastifyInstance> {
     prefix: '/'
   });
 
+  const requireAdminPassword = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAuthorizedAdminRequest(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+  };
+
   app.get('/health', async () => {
     return {
       status: 'ok',
@@ -227,11 +370,18 @@ export async function buildApp(): Promise<FastifyInstance> {
     };
   });
 
-  app.get('/', async (_request, reply) => {
+  app.get('/', async (request, reply) => {
+    if (!isAuthorizedAdminRequest(request)) {
+      return reply
+        .code(401)
+        .type('text/html; charset=utf-8')
+        .send(renderLoginPage());
+    }
+
     return reply.sendFile('index.html');
   });
 
-  app.post('/upload', async (request, reply) => {
+  app.post('/upload', { preHandler: requireAdminPassword }, async (request, reply) => {
     const file = await request.file();
     if (!file) {
       return reply.code(400).send({ error: 'missing file in multipart field "file"' });
@@ -239,14 +389,31 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     const fields = file.fields as Record<string, { value: string }>;
 
-    const expiresRaw = fields.expiresInHours?.value?.trim() ?? '';
+    const expiresInHoursRaw = fields.expiresInHours?.value?.trim() ?? '';
+    const expiresValueRaw = fields.expiresValue?.value?.trim() ?? '';
+    const expiresUnitRaw = fields.expiresUnit?.value?.trim() ?? 'hour';
+
     let expiresInHours: number | null = null;
-    if (expiresRaw !== '') {
-      const parsedExpires = Number(expiresRaw);
+    if (expiresInHoursRaw !== '') {
+      const parsedExpires = Number(expiresInHoursRaw);
       if (!Number.isFinite(parsedExpires)) {
         return reply.code(400).send({ error: 'invalid expiresInHours' });
       }
       expiresInHours = Math.min(Math.max(1, Math.floor(parsedExpires)), MAX_EXPIRES_HOURS);
+    } else if (expiresValueRaw !== '') {
+      const parsedValue = Number(expiresValueRaw);
+      if (!Number.isFinite(parsedValue) || parsedValue < 1) {
+        return reply.code(400).send({ error: 'invalid expiresValue' });
+      }
+
+      const unit = expiresUnitRaw === 'day' ? 'day' : 'hour';
+      const normalizedValue = Math.floor(parsedValue);
+      if (unit === 'day') {
+        const cappedDays = Math.min(normalizedValue, 7);
+        expiresInHours = cappedDays * 24;
+      } else {
+        expiresInHours = Math.min(normalizedValue, MAX_EXPIRES_HOURS);
+      }
     }
 
     const maxDownloadsRaw = fields.maxDownloads?.value?.trim() ?? '';
@@ -406,13 +573,27 @@ export async function buildApp(): Promise<FastifyInstance> {
     return reply.send(createReadStream(record.filePath));
   });
 
-  app.get('/admin/files', async (request) => {
+  app.get('/admin/storage', { preHandler: requireAdminPassword }, async () => {
+    const storage = await getStorageStats(store.getUploadDir());
+
+    return {
+      totalBytes: storage.total,
+      usedBytes: storage.used,
+      availableBytes: storage.available,
+      total: formatBytes(storage.total),
+      used: formatBytes(storage.used),
+      available: formatBytes(storage.available)
+    };
+  });
+
+  app.get('/admin/files', { preHandler: requireAdminPassword }, async (request) => {
     const records = store.list();
     const baseUrl = getBaseUrl(request);
     const availableFiles: Array<{
       token: string;
       fileName: string;
       size: number;
+      createdAt: string;
       expiresAt: string | null;
       downloadCount: number;
       maxDownloads: number | null;
@@ -437,6 +618,7 @@ export async function buildApp(): Promise<FastifyInstance> {
         token: record.token,
         fileName: record.originalName,
         size: record.size,
+        createdAt: record.createdAt,
         expiresAt: record.expiresAt,
         downloadCount: record.downloadCount,
         maxDownloads: record.maxDownloads,
@@ -448,7 +630,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     return { files: availableFiles };
   });
 
-  app.delete('/admin/files/:token', async (request, reply) => {
+  app.delete('/admin/files/:token', { preHandler: requireAdminPassword }, async (request, reply) => {
     const token = (request.params as { token: string }).token;
     const removed = await store.remove(token);
 
@@ -459,7 +641,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     return reply.code(204).send();
   });
 
-  app.delete('/admin/files', async (request, reply) => {
+  app.delete('/admin/files', { preHandler: requireAdminPassword }, async (request, reply) => {
     const body = (request.body ?? {}) as { tokens?: unknown };
     if (!Array.isArray(body.tokens)) {
       return reply.code(400).send({ error: 'tokens must be an array' });

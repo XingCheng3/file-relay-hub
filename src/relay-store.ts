@@ -40,6 +40,7 @@ export class RelayStore {
       for (const record of parsed.records ?? []) {
         this.records.set(record.token, {
           ...record,
+          createdAt: record.createdAt ?? new Date().toISOString(),
           expiresAt: record.expiresAt ?? null
         });
       }

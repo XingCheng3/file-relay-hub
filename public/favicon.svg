@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="File Relay Hub">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4f7cff"/>
+      <stop offset="100%" stop-color="#6be3ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="52" height="52" rx="12" fill="#0f1630"/>
+  <path d="M20 16h17l11 11v21H20z" fill="url(#g)"/>
+  <path d="M37 16v11h11" fill="none" stroke="#dff7ff" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M26 40h16M26 46h12" stroke="#dff7ff" stroke-width="3" stroke-linecap="round"/>
+</svg>

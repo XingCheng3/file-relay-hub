@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>File Relay Hub</title>
     <style>
       :root { color-scheme: light dark; }
@@ -27,7 +28,7 @@
       .ok { color: #83f4aa; }
       .expire-row { display: grid; grid-template-columns: 1fr 140px; gap: 10px; align-items: end; }
       .table-wrap { overflow-x: auto; margin-top: 10px; }
-      table { width: 100%; border-collapse: collapse; min-width: 760px; }
+      table { width: 100%; border-collapse: collapse; min-width: 880px; }
       th, td { text-align: left; border-bottom: 1px solid #2a365e; padding: 10px 8px; vertical-align: middle; }
       th { color: #c9d3ea; font-size: 13px; }
       td { color: #e8ecf3; font-size: 14px; }
@@ -38,14 +39,58 @@
       .ops a { color: #8ab4ff; text-decoration: none; }
       .ops button { margin-top: 0; padding: 6px 10px; font-size: 12px; }
       .loading { color: #8ea0c8; padding: 14px 0; }
+      .head-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+      .storage-grid {
+        margin-top: 10px;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(180px, 1fr));
+        gap: 10px;
+      }
+      .metric {
+        background: #0f1630;
+        border: 1px solid #2a365e;
+        border-radius: 10px;
+        padding: 10px;
+      }
+      .metric .label { color: #9db0d8; font-size: 12px; margin-bottom: 4px; }
+      .metric .value { font-size: 16px; font-weight: 600; }
+      .metric .sub { color: #8ea0c8; font-size: 12px; margin-top: 2px; }
     </style>
   </head>
   <body>
     <div class="wrap">
       <div class="card">
-        <h1>📦 File Relay Hub</h1>
+        <div class="head-row">
+          <h1>📦 File Relay Hub</h1>
+          <button id="relogin-btn" class="button-ghost" type="button" style="margin-top:0">切换密码</button>
+        </div>
         <p>上传文件后，生成可分享下载链接（支持可选过期时间和下载次数限制）。</p>
+      </div>
 
+      <div class="card">
+        <h2>服务器磁盘空间（上传目录所在分区）</h2>
+        <div id="storage-status" class="muted">加载中...</div>
+        <div class="storage-grid" id="storage-grid" style="display:none">
+          <div class="metric">
+            <div class="label">总量</div>
+            <div class="value" id="storage-total">-</div>
+            <div class="sub" id="storage-total-bytes">-</div>
+          </div>
+          <div class="metric">
+            <div class="label">已使用</div>
+            <div class="value" id="storage-used">-</div>
+            <div class="sub" id="storage-used-bytes">-</div>
+          </div>
+          <div class="metric">
+            <div class="label">可用</div>
+            <div class="value" id="storage-available">-</div>
+            <div class="sub" id="storage-available-bytes">-</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>上传文件</h2>
         <form id="upload-form">
           <label for="file">文件</label>
           <input id="file" name="file" type="file" required />
@@ -90,6 +135,7 @@
                 <th><input id="select-all" type="checkbox" /></th>
                 <th>文件名</th>
                 <th>大小</th>
+                <th>创建时间</th>
                 <th>过期时间</th>
                 <th>下载次数</th>
                 <th>操作</th>
@@ -102,6 +148,8 @@
     </div>
 
     <script>
+      const ADMIN_PASSWORD_STORAGE_KEY = 'fileRelayHubAdminPassword';
+
       const form = document.getElementById('upload-form');
       const submitBtn = document.getElementById('submit-btn');
       const errorEl = document.getElementById('error');
@@ -112,6 +160,16 @@
       const expiresValueEl = document.getElementById('expiresValue');
       const expiresUnitEl = document.getElementById('expiresUnit');
       const expiresHintEl = document.getElementById('expiresHint');
+      const reloginBtnEl = document.getElementById('relogin-btn');
+
+      const storageStatusEl = document.getElementById('storage-status');
+      const storageGridEl = document.getElementById('storage-grid');
+      const storageTotalEl = document.getElementById('storage-total');
+      const storageUsedEl = document.getElementById('storage-used');
+      const storageAvailableEl = document.getElementById('storage-available');
+      const storageTotalBytesEl = document.getElementById('storage-total-bytes');
+      const storageUsedBytesEl = document.getElementById('storage-used-bytes');
+      const storageAvailableBytesEl = document.getElementById('storage-available-bytes');
 
       const filesTbodyEl = document.getElementById('files-tbody');
       const refreshBtnEl = document.getElementById('refresh-btn');
@@ -121,6 +179,32 @@
 
       const selectedTokens = new Set();
       let currentFiles = [];
+
+      function getStoredPassword() {
+        return (sessionStorage.getItem(ADMIN_PASSWORD_STORAGE_KEY) || '').trim();
+      }
+
+      function promptPassword(message) {
+        const input = window.prompt(message || '请输入访问密码');
+        if (input === null) return null;
+        const password = input.trim();
+        if (!password) return null;
+        sessionStorage.setItem(ADMIN_PASSWORD_STORAGE_KEY, password);
+        return password;
+      }
+
+      function ensurePassword(forcePrompt) {
+        if (!forcePrompt) {
+          const cached = getStoredPassword();
+          if (cached) return cached;
+        }
+        return promptPassword('请输入页面访问密码');
+      }
+
+      function bytesToGBString(bytes) {
+        if (!Number.isFinite(bytes) || bytes < 0) return '-';
+        return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+      }
 
       function formatBytes(bytes) {
         if (!Number.isFinite(bytes) || bytes < 0) return '-';
@@ -158,6 +242,39 @@
           .replace(/'/g, '&#39;');
       }
 
+      function buildAdminHeaders(originHeaders, password) {
+        const headers = new Headers(originHeaders || {});
+        headers.set('x-admin-password', password);
+        return headers;
+      }
+
+      async function adminFetch(url, options = {}, retry = true) {
+        const password = ensurePassword(false);
+        if (!password) {
+          throw new Error('未输入访问密码');
+        }
+
+        const response = await fetch(url, {
+          ...options,
+          headers: buildAdminHeaders(options.headers, password)
+        });
+
+        if (response.status === 401 && retry) {
+          sessionStorage.removeItem(ADMIN_PASSWORD_STORAGE_KEY);
+          const nextPassword = ensurePassword(true);
+          if (!nextPassword) {
+            return response;
+          }
+
+          return fetch(url, {
+            ...options,
+            headers: buildAdminHeaders(options.headers, nextPassword)
+          });
+        }
+
+        return response;
+      }
+
       function updateExpireInputLimit() {
         if (expiresUnitEl.value === 'day') {
           expiresValueEl.max = '7';
@@ -185,7 +302,7 @@
 
       function renderFiles() {
         if (currentFiles.length === 0) {
-          filesTbodyEl.innerHTML = '<tr><td class="empty" colspan="6">暂无可用文件</td></tr>';
+          filesTbodyEl.innerHTML = '<tr><td class="empty" colspan="7">暂无可用文件</td></tr>';
           updateSelectionInfo();
           return;
         }
@@ -202,6 +319,7 @@
               <td><input class="row-select" type="checkbox" data-token="${token}" ${checked} /></td>
               <td>${fileName}</td>
               <td>${formatBytes(item.size)}</td>
+              <td>${formatDateTime(item.createdAt)}</td>
               <td>${formatDateTime(item.expiresAt)}</td>
               <td>${downloadInfo}</td>
               <td>
@@ -218,10 +336,36 @@
         updateSelectionInfo();
       }
 
-      async function refreshFileList() {
-        filesTbodyEl.innerHTML = '<tr><td class="loading" colspan="6">加载中...</td></tr>';
+      async function refreshStorage() {
+        storageStatusEl.textContent = '加载中...';
+        storageGridEl.style.display = 'none';
         try {
-          const res = await fetch('/admin/files');
+          const res = await adminFetch('/admin/storage');
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(data.error || '加载磁盘空间失败');
+          }
+
+          storageTotalEl.textContent = bytesToGBString(data.totalBytes);
+          storageUsedEl.textContent = bytesToGBString(data.usedBytes);
+          storageAvailableEl.textContent = bytesToGBString(data.availableBytes);
+
+          storageTotalBytesEl.textContent = `${formatBytes(data.totalBytes)} (${data.totalBytes} bytes)`;
+          storageUsedBytesEl.textContent = `${formatBytes(data.usedBytes)} (${data.usedBytes} bytes)`;
+          storageAvailableBytesEl.textContent = `${formatBytes(data.availableBytes)} (${data.availableBytes} bytes)`;
+
+          storageStatusEl.textContent = '';
+          storageGridEl.style.display = 'grid';
+        } catch (err) {
+          storageStatusEl.textContent = err?.message || '加载磁盘空间失败';
+          storageGridEl.style.display = 'none';
+        }
+      }
+
+      async function refreshFileList() {
+        filesTbodyEl.innerHTML = '<tr><td class="loading" colspan="7">加载中...</td></tr>';
+        try {
+          const res = await adminFetch('/admin/files');
           const data = await res.json();
           if (!res.ok) {
             throw new Error(data.error || '加载文件列表失败');
@@ -235,7 +379,7 @@
 
           renderFiles();
         } catch (err) {
-          filesTbodyEl.innerHTML = `<tr><td class="error" colspan="6">${err?.message || '加载文件列表失败'}</td></tr>`;
+          filesTbodyEl.innerHTML = `<tr><td class="error" colspan="7">${err?.message || '加载文件列表失败'}</td></tr>`;
           currentFiles = [];
           selectedTokens.clear();
           updateSelectionInfo();
@@ -243,7 +387,7 @@
       }
 
       async function deleteOne(token) {
-        const res = await fetch(`/admin/files/${encodeURIComponent(token)}`, { method: 'DELETE' });
+        const res = await adminFetch(`/admin/files/${encodeURIComponent(token)}`, { method: 'DELETE' });
         if (!res.ok && res.status !== 404) {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || '删除失败');
@@ -251,7 +395,7 @@
       }
 
       async function deleteMany(tokens) {
-        const res = await fetch('/admin/files', {
+        const res = await adminFetch('/admin/files', {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ tokens })
@@ -261,6 +405,14 @@
           throw new Error(data.error || '批量删除失败');
         }
       }
+
+      reloginBtnEl.addEventListener('click', () => {
+        sessionStorage.removeItem(ADMIN_PASSWORD_STORAGE_KEY);
+        const nextPassword = ensurePassword(true);
+        if (!nextPassword) return;
+        void refreshStorage();
+        void refreshFileList();
+      });
 
       expiresUnitEl.addEventListener('change', updateExpireInputLimit);
 
@@ -276,7 +428,6 @@
         }
 
         const fd = new FormData();
-        fd.append('file', fileInput.files[0]);
 
         const expiresRaw = expiresValueEl.value.trim();
         if (expiresRaw !== '') {
@@ -287,23 +438,28 @@
           }
 
           const normalized = Math.floor(parsed);
-          const unit = expiresUnitEl.value;
+          const unit = expiresUnitEl.value === 'day' ? 'day' : 'hour';
           const expiresInHours = unit === 'day'
             ? Math.min(normalized, 7) * 24
             : Math.min(normalized, 168);
 
+          fd.append('expiresValue', String(normalized));
+          fd.append('expiresUnit', unit);
           fd.append('expiresInHours', String(expiresInHours));
         }
 
         const maxDownloads = document.getElementById('maxDownloads').value.trim();
         if (maxDownloads) fd.append('maxDownloads', maxDownloads);
 
+        // multipart 字段建议在 file 前发送，避免后端读取 file 时拿不到后续字段
+        fd.append('file', fileInput.files[0]);
+
         submitBtn.disabled = true;
         submitBtn.textContent = '上传中...';
 
         try {
-          const res = await fetch('/upload', { method: 'POST', body: fd });
-          const data = await res.json();
+          const res = await adminFetch('/upload', { method: 'POST', body: fd });
+          const data = await res.json().catch(() => ({}));
 
           if (!res.ok) {
             throw new Error(data.error || '上传失败');
@@ -315,7 +471,7 @@
           linkEl.textContent = data.downloadUrl;
           resultEl.style.display = 'block';
 
-          await refreshFileList();
+          await Promise.all([refreshStorage(), refreshFileList()]);
         } catch (err) {
           errorEl.textContent = err?.message || '上传失败';
         } finally {
@@ -325,7 +481,7 @@
       });
 
       refreshBtnEl.addEventListener('click', () => {
-        void refreshFileList();
+        void Promise.all([refreshStorage(), refreshFileList()]);
       });
 
       filesTbodyEl.addEventListener('change', (e) => {
@@ -370,7 +526,7 @@
         try {
           await deleteOne(token);
           selectedTokens.delete(token);
-          await refreshFileList();
+          await Promise.all([refreshStorage(), refreshFileList()]);
         } catch (err) {
           alert(err?.message || '删除失败');
           button.disabled = false;
@@ -386,7 +542,7 @@
         try {
           await deleteMany(tokens);
           selectedTokens.clear();
-          await refreshFileList();
+          await Promise.all([refreshStorage(), refreshFileList()]);
         } catch (err) {
           alert(err?.message || '批量删除失败');
           updateSelectionInfo();
@@ -394,7 +550,8 @@
       });
 
       updateExpireInputLimit();
-      void refreshFileList();
+      ensurePassword(false);
+      void Promise.all([refreshStorage(), refreshFileList()]);
     </script>
   </body>
 </html>

@@ -9,5 +9,6 @@ services:
       HOST: 0.0.0.0
       PORT: 3000
       CLEANUP_INTERVAL_MINUTES: 10
+      ADMIN_PASSWORD: 17734
     volumes:
       - ./data:/app/data
